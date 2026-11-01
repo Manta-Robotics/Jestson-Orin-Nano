@@ -60,7 +60,7 @@ test('bounded gimbal keeps its original rear boundary until the target is reacha
     assert.equal(previous, -135);
   }
   const r = computeBeaconControl({ now: 1000, uwb: { online: true, fresh: true, updatedAt: 1000, azimuthDeg: -179, distanceM: 2.5 },
-    feedback: { checksumValid: true, attitudeValid: true, updatedAt: 1000, pitchDeg: 0 },
+    feedback: { checksumValid: true, attitudeValid: true, updatedAt: 1000, pitchDeg: 0, yawDeg: 120 },
     config: { use_pitch: false, control_mode: 'absolute_angle' }, limits: { yawMinDeg: -135, yawMaxDeg: 135 }, previousTargetYawDeg: 135 });
   assert.equal(r.targetYawDeg, 135); assert.equal(r.yawUnreachable, true);
 });

@@ -14,7 +14,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const exec = promisify(execFile);
 
 test('isolated production HTTP/Socket.IO routes control a simulated A8, save video and dispatch mocked poweroff',
-  { skip: process.platform === 'win32' || !process.env.MANTA_TEST_MEDIAMTX, timeout: 45000 }, async t => {
+  { skip: process.platform === 'win32' || !process.env.MANTA_TEST_MEDIAMTX, timeout: 90000 }, async t => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'manta-follow-camera-http-'));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
   const input = path.join(directory, 'source.mp4');
@@ -40,13 +40,14 @@ test('isolated production HTTP/Socket.IO routes control a simulated A8, save vid
   await Promise.all([camera, bridge, temp].map(socket => new Promise(resolve => socket.bind(0, '127.0.0.1', resolve))));
   const telemetryPort = temp.address().port; await new Promise(resolve => temp.close(resolve));
   t.after(() => { camera.close(); bridge.close(); });
-  const yawCommands = []; let yaw = 0;
+  const yawCommands = []; let yaw = 0, homeCommands = 0;
   camera.on('message', (message, peer) => {
     for (const packet of decodeSiyiPackets(message).packets) {
       let payload;
       if (packet.command === 0x0a) { payload = Buffer.alloc(6); payload[5] = 2; }
       if (packet.command === 0x0d) { payload = Buffer.alloc(12); payload.writeInt16LE(Math.round(yaw * 10), 0); payload.writeInt16LE(1800, 2); }
       if (packet.command === 0x0e) { yaw = packet.payload.readInt16LE(0) / 10; yawCommands.push({ yaw, at: performance.now() }); }
+      if (packet.command === 0x08) { yaw = 0; homeCommands++; }
       if (payload) { const response = encodeSiyiPacket(packet.command, payload, packet.sequence); response[2] = 2;
         // Recompute CRC after changing the response-control byte.
         response.writeUInt16LE(siyiCrc16(response.subarray(0, -2)), response.length-2); camera.send(response, peer.port, peer.address); }
@@ -79,7 +80,8 @@ test('isolated production HTTP/Socket.IO routes control a simulated A8, save vid
   assert.equal((await request('/api/control/claim', {})).status, 200);
   let angle = -40;
   const sendUwb = () => bridge.send(Buffer.from(JSON.stringify({ type: 'uwb', payload: { source: 'simulated', streamId: 'test', online: true, fresh: true,
-    measurementStatus: 'trusted', smoothing: { ready: true }, distanceM: 2.5, azimuthDeg: angle, measurementUpdatedAt: Date.now(), updatedAt: Date.now(),
+    measurementStatus: 'trusted', coordinateSource: 'smoothed', smoothing: { ready: true }, elevationDeg: null, elevationValid: false,
+    distanceM: 2.5, azimuthDeg: angle, measurementUpdatedAt: Date.now(), updatedAt: Date.now(),
     relativeXM: 2.5*Math.cos(angle*Math.PI/180), relativeYM: 2.5*Math.sin(angle*Math.PI/180) } })), telemetryPort, '127.0.0.1');
   const timer = setInterval(sendUwb, 28); t.after(() => clearInterval(timer)); sendUwb();
   await delay(250);
@@ -92,6 +94,44 @@ test('isolated production HTTP/Socket.IO routes control a simulated A8, save vid
   assert.equal(state.trackStatus.targetYawDeg, 135); assert.equal(state.trackStatus.status, 'yaw_limit_hold');
   // Roundoff in 0.1 degree wire units contributes up to one unit to adjacent steps.
   for (let i=1;i<yawCommands.length;i++) assert.ok(Math.abs(yawCommands[i].yaw-yawCommands[i-1].yaw) <= 20*(yawCommands[i].at-yawCommands[i-1].at)/1000 + .15);
+  // Home takes control from Beacon and remains centered beyond the old pause.
+  assert.equal((await request('/api/gimbal/home', {})).status, 200);
+  await until(() => homeCommands > 0, 'No SIYI Home command arrived');
+  await delay(1300);
+  state=(await (await request('/api/gimbal/state')).json()).state;
+  assert.equal(state.trackingActive,false);assert.equal(yaw,0);
+  angle=-40;
+  assert.equal((await request('/api/gimbal/track/start',{mode:'beacon'})).status,200);
+  await until(()=>yaw>3,'Beacon did not resume after manual Home',2000);
+  const readCalibration=async()=> (await (await request('/api/gimbal/beacon/calibration')).json()).calibration;
+  assert.equal((await readCalibration()).available,true,'Horizontal calibration must work with unverified elevation');
+  assert.equal((await request('/api/gimbal/beacon/calibration/start',{profile:'horizontal9'})).status,409,'Range requires explicit selection');
+  assert.equal((await request('/api/gimbal/beacon/calibration/start',{profile:'precision25'})).status,409,'3D cannot invent elevation');
+  assert.equal((await request('/api/gimbal/beacon/calibration/start',{profile:'horizontal9',yawExtentDeg:32})).status,200);
+  assert.equal((await request('/api/gimbal/beacon/calibration/cancel',{})).status,200);
+  assert.equal((await (await request('/api/gimbal/state')).json()).state.trackingActive,true,'Cancel resumes previous Beacon');
+  const priorConfig=await fs.readFile(filename,'utf8');
+  assert.equal((await request('/api/gimbal/beacon/calibration/start',{profile:'horizontal9',yawExtentDeg:60})).status,200);
+  assert.equal((await request('/api/gimbal/beacon/calibration/apply',{})).status,409,'Cannot apply incomplete observations');
+  for(let i=0;i<9;i++) {
+    const cal=await readCalibration();assert.equal(cal.index,i);
+    angle=(cal.point.yawDeg-4)/-.9; // simulated tag centered in the measured camera image
+    await delay(Math.max(0,cal.readyAt-Date.now())+120);
+    const response=await request('/api/gimbal/beacon/calibration/capture',{});
+    const payload=await response.json();assert.equal(response.status,200,JSON.stringify(payload));
+    assert.equal(await fs.readFile(filename,'utf8'),priorConfig,'Capture must not save unconfirmed coefficients');
+  }
+  const review=await readCalibration();assert.equal(review.status,'review');
+  assert.ok(review.result.metrics.validationAngularMaxErrorDeg<.1);
+  assert.equal((await request('/api/gimbal/beacon/calibration/apply',{})).status,200);
+  assert.equal((await readCalibration()).status,'complete');
+  const saved=JSON.parse(await fs.readFile(filename));
+  assert.ok(Math.abs(saved.gimbal.beacon.planar_yaw_calibration.gain+.9)<.001);
+  angle=20;await delay(300);
+  state=(await (await request('/api/gimbal/state')).json()).state;
+  assert.equal(state.trackStatus.calibrationModel,'planar_yaw_calibrated');
+  assert.ok(Math.abs(state.trackStatus.targetYawDeg-(-14))<.1);
+  assert.equal((await request('/api/gimbal/stop',{})).status,200);
   for (let i=0;i<5;i++) {
     assert.equal((await request('/api/gimbal/recording/start', { name: 'http-cycle-'+i })).status, 200);
     let status;

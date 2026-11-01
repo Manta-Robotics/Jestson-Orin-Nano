@@ -29,6 +29,7 @@ import { createGimbalWebrtcProxy } from './gimbal_webrtc_proxy.js';
 import { WifiLatestDelivery, WIFI_COMPRESSION, restrictCompressionToWifi, emitWifiAwareState } from './wifi_latest_delivery.js';
 import { computeBeaconControl, normalizeAngleDeg } from './gimbal_beacon.js';
 import { fitBeaconCalibration, generateBeaconCalibrationPoints, assertBeaconCalibrationGrid } from './gimbal_beacon_calibration.js';
+import { generatePlanarCalibrationPoints, fitPlanarCalibration } from './gimbal_planar_calibration.js';
 import { calibrationUwbObservation, calibrationGimbalPose } from './beacon_calibration_input.js';
 import { summarizeBeaconCalibrationReadings } from './beacon_calibration_sampling.js';
 import { shapeRoverAxis } from './rover_slew.js';
@@ -534,7 +535,8 @@ const gimbalState = {
     pitchSourceScale: Number(GIMBAL_BEACON_CONFIG.pitch_source_scale || 1),
     yawOffsetDeg: Number(GIMBAL_BEACON_CONFIG.yaw_offset_deg || 0),
     pitchOffsetDeg: Number(GIMBAL_BEACON_CONFIG.pitch_offset_deg || 0),
-    calibrationModel: GIMBAL_BEACON_CONFIG.extrinsic_3d && GIMBAL_BEACON_CONFIG.extrinsic_3d.enabled === true ? 'rigid_3d' : 'legacy_angular'
+    calibrationModel: GIMBAL_BEACON_CONFIG.use_pitch === false && GIMBAL_BEACON_CONFIG.planar_yaw_calibration?.enabled === true ? 'planar_yaw_calibrated'
+      : GIMBAL_BEACON_CONFIG.extrinsic_3d && GIMBAL_BEACON_CONFIG.extrinsic_3d.enabled === true ? 'rigid_3d' : 'legacy_angular'
   },
   lastTarget: null,
   trackingActive: false,
@@ -1688,12 +1690,10 @@ function slewBeaconAbsoluteCommand(result, now) {
   // A bounded pan axis cannot take a wrapped shortcut through its hard stop.
   const yawErrorDeg = yawTarget - gimbalBeaconAbsoluteCommand.yawDeg;
   const pitchErrorDeg = pitchTarget - gimbalBeaconAbsoluteCommand.pitchDeg;
-  const yawStep = Math.abs(yawErrorDeg) <= Number(result.yawDeadbandDeg || 0)
-    ? 0
-    : clamp(yawErrorDeg, -Number(result.maxYawRateDps) * dt, Number(result.maxYawRateDps) * dt);
-  const pitchStep = Math.abs(pitchErrorDeg) <= Number(result.pitchDeadbandDeg || 0)
-    ? 0
-    : clamp(pitchErrorDeg, -Number(result.maxPitchRateDps) * dt, Number(result.maxPitchRateDps) * dt);
+  // Slew all the way to the image-center target. The tolerance belongs to
+  // measured arrival, not this command interpolator, or a static offset remains.
+  const yawStep = clamp(yawErrorDeg, -Number(result.maxYawRateDps) * dt, Number(result.maxYawRateDps) * dt);
+  const pitchStep = clamp(pitchErrorDeg, -Number(result.maxPitchRateDps) * dt, Number(result.maxPitchRateDps) * dt);
   const next = setBeaconAbsoluteCommand(
     gimbalBeaconAbsoluteCommand.yawDeg + yawStep,
     gimbalBeaconAbsoluteCommand.pitchDeg + pitchStep,
@@ -1741,12 +1741,13 @@ function computeGimbalBeaconDesiredRate(now) {
   gimbalBeaconTargetYawDeg = result.targetYawDeg;
   if (result.controlMode === 'absolute_angle') {
     const command = slewBeaconAbsoluteCommand(result, now);
+    const centered = result.centering.horizontalWithinTolerance && (result.pitchHeld || result.centering.verticalWithinTolerance === true);
     const target = {
-      locked: !result.yawUnreachable,
-      status: GIMBAL_BEACON_DRY_RUN ? 'dry_run' : result.yawUnreachable ? 'yaw_limit_hold' : 'track',
+      locked: centered,
+      status: GIMBAL_BEACON_DRY_RUN ? 'dry_run' : result.yawUnreachable ? 'yaw_limit_hold' : centered ? 'track' : 'centering',
       mode: 'beacon',
       controlMode: 'absolute_angle',
-      message: GIMBAL_BEACON_DRY_RUN ? 'UWB BEACON DRY RUN' : result.yawUnreachable ? '目标超出云台范围；保持原侧限位' : result.pitchHeld ? '水平追踪；俯仰固定水平' : 'UWB BEACON LOCKED',
+      message: GIMBAL_BEACON_DRY_RUN ? 'UWB BEACON DRY RUN' : result.yawUnreachable ? '目标超出云台范围；保持原侧限位' : result.pitchHeld ? (centered ? '水平指向已收敛；俯仰固定水平' : '正在向画面水平中心收敛；俯仰固定水平') : centered ? 'UWB 指向已收敛' : '正在向画面中心收敛',
       pitchHeld: Boolean(result.pitchHeld),
       dryRun: GIMBAL_BEACON_DRY_RUN,
       azimuthDeg: result.azimuthDeg,
@@ -1760,8 +1761,9 @@ function computeGimbalBeaconDesiredRate(now) {
       commandYawDeg: command.yawDeg,
       commandPitchDeg: command.pitchDeg,
       limited: Boolean(result.limited),
-      errorYawDeg: command.yawErrorDeg,
-      errorPitchDeg: command.pitchErrorDeg,
+      errorYawDeg: result.centering.horizontalErrorDeg,
+      errorPitchDeg: result.centering.verticalErrorDeg,
+      centering: result.centering,
       proposedRateX: command.rateX,
       proposedRateY: command.rateY,
       uwbAgeMs: Math.round(result.uwbAgeMs),
@@ -2364,21 +2366,24 @@ function sendGimbalClickTarget(dx, dy, holdMs = null) {
   return target;
 }
 
-function publicBeaconCalibrationState() {
+function publicBeaconCalibrationState(requestedMode = null) {
   const now = Date.now();
-  const uwbReady = Boolean(calibrationUwbObservation(systemState.telemetry.uwb, now));
+  const mode = requestedMode || gimbalBeaconCalibrationState.mode || (GIMBAL_BEACON_CONFIG.use_pitch === false ? 'planar_yaw' : 'rigid_3d');
+  const uwbReady = Boolean(calibrationUwbObservation(systemState.telemetry.uwb, now, null, mode));
   const feedback = gimbalState.feedback;
   const feedbackReady = !IS_SIYI || Boolean(feedback?.checksumValid === true && feedback.attitudeValid !== false
     && now >= Number(feedback.updatedAt) && now - Number(feedback.updatedAt) <= 300);
   const available = Boolean(gimbalState.portOpen && uwbReady && feedbackReady);
   return {
     ...gimbalBeaconCalibrationState,
-    available,
+    available, mode,
     unavailableReason: !gimbalState.portOpen ? '云台连接未打开' : !feedbackReady ? '等待实时云台姿态反馈'
-      : systemState.telemetry.uwb.elevationValid === false ? 'UWB 仰角未通过等高验证，暂不能进行三维校准'
+      : mode !== 'planar_yaw' && systemState.telemetry.uwb.elevationValid === false ? 'UWB 仰角未验证，请选择水平校准'
       : !uwbReady ? '等待有效 UWB 定位，请将信标放在基站视野内并保持静止' : '',
-    defaultProfile: 'precision25',
-    profiles: [{id:'precision25', label:'25 点精细校准', total:25}, {id:'quick9', label:'9 点快速校准', total:9}],
+    defaultProfile: mode === 'planar_yaw' ? 'horizontal9' : 'precision25',
+    profiles: [{id:'horizontal9', label:'9 点水平校准', total:9, available:Boolean(calibrationUwbObservation(systemState.telemetry.uwb,now,null,'planar_yaw'))},
+      {id:'precision25', label:'25 点三维精细校准', total:25, available:systemState.telemetry.uwb.elevationValid === true},
+      {id:'quick9', label:'9 点三维快速校准', total:9, available:systemState.telemetry.uwb.elevationValid === true}],
     samples: gimbalBeaconCalibrationState.samples.map((sample) => ({ ...sample }))
   };
 }
@@ -2414,8 +2419,12 @@ function moveGimbalToCalibrationPoint(point) {
 
 function persistBeaconCalibration(result) {
   const previous = { ...GIMBAL_BEACON_CONFIG };
-  if (!result || result.model !== 'rigid_3d' || !result.extrinsic_3d) throw new Error('Unsupported UWB beacon calibration model');
-  Object.assign(GIMBAL_BEACON_CONFIG, { extrinsic_3d: result.extrinsic_3d, calibration_required: false });
+  if (result?.model === 'planar_yaw' && result.planar_yaw_calibration) {
+    Object.assign(GIMBAL_BEACON_CONFIG, {planar_yaw_calibration: result.planar_yaw_calibration, calibration_required: false});
+  } else if (result?.model === 'rigid_3d' && result.extrinsic_3d) {
+    Object.assign(GIMBAL_BEACON_CONFIG, {extrinsic_3d: result.extrinsic_3d, calibration_required: false});
+    delete GIMBAL_BEACON_CONFIG.planar_yaw_calibration;
+  } else throw new Error('Unsupported UWB beacon calibration model');
   const errors = validateSystemConfig(config);
   if (errors.length) {
     Object.keys(GIMBAL_BEACON_CONFIG).forEach((key) => delete GIMBAL_BEACON_CONFIG[key]);
@@ -2432,19 +2441,21 @@ function persistBeaconCalibration(result) {
     Object.assign(GIMBAL_BEACON_CONFIG, previous);
     throw error;
   }
-  Object.assign(gimbalState.beacon, { calibrationRequired: false, calibrationModel: 'rigid_3d', extrinsic3dEnabled: true, calibrationMetrics: result.metrics });
+  Object.assign(gimbalState.beacon, { calibrationRequired: false, calibrationModel: result.model, extrinsic3dEnabled: result.model === 'rigid_3d', calibrationMetrics: result.metrics });
 }
 
 function startBeaconCalibrationSession(options = {}) {
   if (isBeaconCalibrationActive()) throw new Error('UWB beacon calibration is already active');
   if (!gimbalState.portOpen) throw new Error('Gimbal control port is not open');
   const resumeBeaconTracking = Boolean(gimbalState.trackingActive && gimbalState.trackMode === 'beacon');
-  const profile = options.profile || 'precision25';
-  const points = generateBeaconCalibrationPoints(Math.random, { profile,
+  const profile = options.profile || (GIMBAL_BEACON_CONFIG.use_pitch === false ? 'horizontal9' : 'precision25');
+  const mode = profile === 'horizontal9' ? 'planar_yaw' : 'rigid_3d';
+  const limits = {yawMinDeg:GIMBAL_YAW_MIN_DEG,yawMaxDeg:GIMBAL_YAW_MAX_DEG,pitchMinDeg:GIMBAL_PITCH_MIN_DEG,pitchMaxDeg:GIMBAL_PITCH_MAX_DEG};
+  const points = mode === 'planar_yaw' ? generatePlanarCalibrationPoints({yawExtentDeg:options.yawExtentDeg,pitchDeg:Number(GIMBAL_BEACON_CONFIG.hold_pitch_deg ?? 0),limits}) : generateBeaconCalibrationPoints(Math.random, { profile,
     limits: {yawMinDeg:GIMBAL_YAW_MIN_DEG, yawMaxDeg:GIMBAL_YAW_MAX_DEG, pitchMinDeg:GIMBAL_PITCH_MIN_DEG, pitchMaxDeg:GIMBAL_PITCH_MAX_DEG} });
   assertBeaconCalibrationGrid(points, { yawMinDeg: GIMBAL_YAW_MIN_DEG, yawMaxDeg: GIMBAL_YAW_MAX_DEG,
     pitchMinDeg: GIMBAL_PITCH_MIN_DEG, pitchMaxDeg: GIMBAL_PITCH_MAX_DEG });
-  const readiness = publicBeaconCalibrationState();
+  const readiness = publicBeaconCalibrationState(mode);
   if (!readiness.available) throw new Error(readiness.unavailableReason);
   if (systemState.telemetry.armed || uwbFollowState.active || uwbFollowState.followRequested) throw new Error('Stop vessel following and disarm before starting gimbal calibration');
   gimbalBeaconCalibrationState = {
@@ -2452,7 +2463,7 @@ function startBeaconCalibrationSession(options = {}) {
     status: 'moving',
     index: 0,
     total: points.length,
-    profile,
+    profile, mode,
     receiverIdentity: null,
     points,
     point: null,
@@ -2508,7 +2519,7 @@ async function collectBeaconCalibrationReading() {
   while (performance.now() < deadline) {
     assertBeaconCalibrationSession(session);
     const now = Date.now();
-    const sample = calibrationUwbObservation(systemState.telemetry.uwb, now, identity);
+    const sample = calibrationUwbObservation(systemState.telemetry.uwb, now, identity, session.mode);
     if (sample && lastAt !== null && sample.at < lastAt) throw new Error('UWB source clock changed during calibration');
     if (sample && !clocks.has(sample.at)) {
       try {
@@ -2519,7 +2530,7 @@ async function collectBeaconCalibrationReading() {
         clocks.add(sample.at); lastAt = sample.at; identity = sample.key;
         if (readings.length > 40) readings.shift();
         if (readings.length >= 32) {
-          const averaged = summarizeBeaconCalibrationReadings(readings);
+          const averaged = summarizeBeaconCalibrationReadings(readings, {mode:session.mode});
           assertBeaconCalibrationSession(session);
           return averaged;
         }
@@ -2554,26 +2565,10 @@ async function captureBeaconCalibrationPoint() {
       moveGimbalToCalibrationPoint(session.points[session.index]);
       return publicBeaconCalibrationState();
     }
-    const result = fitBeaconCalibration(session.samples);
+    session.result = session.mode === 'planar_yaw' ? fitPlanarCalibration(session.samples) : fitBeaconCalibration(session.samples);
     assertBeaconCalibrationSession(session);
-    persistBeaconCalibration(result);
-    const resumeBeaconTracking = session.resumeBeaconTracking === true;
-    session.active = false;
-    session.status = 'complete';
-    session.result = result;
-    session.resumeBeaconTracking = false;
-    session.message = resumeBeaconTracking
-      ? 'Multi-point 3D UWB beacon calibration completed; Beacon tracking resumed.'
-      : 'Multi-point 3D UWB beacon calibration completed.';
-    if (resumeBeaconTracking) {
-      const resumed = startGimbalBeaconTracking();
-      if (!resumed.ok) {
-        session.message += ` Tracking resume failed: ${resumed.error}`;
-        addLog('GIMBAL_ERR', session.message);
-      }
-    } else {
-      stopGimbalTracking(true);
-    }
+    session.status = 'review';
+    session.message = 'Calibration computed; review parameters and independent validation before applying.';
     return publicBeaconCalibrationState();
   } finally {
     session.captureInProgress = false;
@@ -5176,7 +5171,7 @@ app.post('/api/gimbal/home', (req, res) => {
     return;
   }
   const body = req.body || {};
-  sendGimbalHome('web', { preserveTracking: body.preserveTracking !== false });
+  sendGimbalHome('web', { preserveTracking: body.preserveTracking === true });
   res.json({ success: true, state: gimbalState });
 });
 
@@ -5392,6 +5387,23 @@ app.post('/api/gimbal/beacon/calibration/capture', async (_req, res) => {
       session.message = error.message;
     }
     res.status(422).json({ success: false, message: error.message, calibration: publicBeaconCalibrationState() });
+  }
+});
+
+app.post('/api/gimbal/beacon/calibration/apply', (_req, res) => {
+  const session = gimbalBeaconCalibrationState;
+  try {
+    assertBeaconCalibrationSession(session);
+    if (session.status !== 'review' || !session.result) throw new Error('Complete calibration and review its result before applying');
+    persistBeaconCalibration(session.result);
+    const resume = session.resumeBeaconTracking === true;
+    session.active = false; session.status = 'complete'; session.resumeBeaconTracking = false;
+    session.message = 'Calibration confirmed and saved.';
+    if (resume) { const result = startGimbalBeaconTracking(); if (!result.ok) throw new Error(result.error); }
+    else stopGimbalTracking(true);
+    res.json({success:true,calibration:publicBeaconCalibrationState(),state:gimbalState});
+  } catch (error) {
+    res.status(409).json({success:false,message:error.message,calibration:publicBeaconCalibrationState()});
   }
 });
 

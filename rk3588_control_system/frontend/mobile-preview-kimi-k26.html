@@ -506,6 +506,25 @@ body[data-theme="light"] .media-rate-select option{color:#173040;background:#f8f
  .drive-body .uwb-path-card{padding-top:0;border:0}
  .drive-body .uwb-path-card small{display:none}
 }
+
+/* Keep the radar a readable plot; diagnostic rows must not squeeze it to a thumbnail. */
+.drive-body>.relative-position-panel{height:auto;min-height:278px;padding:9px;align-self:start;grid-template-rows:28px auto 22px 15px 15px 28px auto;row-gap:3px}
+.drive-body .relative-position-plot{width:100%;height:auto;min-height:128px;aspect-ratio:12/11;margin:0}
+.drive-body .relative-position-plot svg{display:block;width:100%;height:100%}
+.drive-body .relative-position-head{grid-template-rows:13px 13px}
+.drive-body .relative-position-head>span{font-size:10px;line-height:13px}
+.drive-body .relative-sample-row[data-kind="trusted"]{display:flex;align-items:center;justify-content:space-between;gap:5px;font-size:8px;line-height:22px}
+.drive-body .relative-position-foot strong{font-size:8px;line-height:15px}
+.drive-body .uwb-quality-row{font-size:7px;line-height:15px}
+.drive-body .relative-decision{font-size:7px;line-height:11px;max-height:22px;white-space:normal;overflow:hidden}
+.drive-body .relative-grid text{font-size:10px}.drive-body .relative-axis-label{font-size:10px}.drive-body .relative-point-label{font-size:11px}
+@media(max-height:600px) and (orientation:landscape){
+ .drive-body>.relative-position-panel{height:auto;min-height:244px;padding:6px;grid-template-rows:28px auto 18px 14px 14px 24px auto;row-gap:2px}
+ .drive-body .relative-position-plot{min-height:112px}
+ .drive-body .uwb-quality-row,.drive-body .relative-decision{display:flex}
+}
+#relativeRadarDialog .relative-position-plot{aspect-ratio:auto;height:100%;min-height:160px}
+
 </style>
 </head>
 <body data-theme="dark" data-language="zh">
@@ -917,7 +936,8 @@ body[data-theme="light"] .media-rate-select option{color:#173040;background:#f8f
     <span class="modal-kicker">UWB BEACON · 9-POINT</span>
     <h2 id="beaconCalibrationTitle">UWB + 云台多点校准</h2>
     <p id="beaconCalibrationLead">针对 360° 基站：25 点覆盖云台可达的水平与俯仰范围，其中 20 点拟合、5 点独立验证。请保持船体和基站不动、信标天线朝向不变；在实际使用距离将信标移到画面中心，每点保持静止至少 1 秒再记录。可在不同点使用不同距离，以检验近远距离效果。云台会转动，请留出空间。</p>
-    <label class="setting-row"><span><b>校准方案</b><small>精细方案通过验证后才保存</small></span><select id="beaconCalibrationProfile"><option value="precision25">25 点精细校准（推荐）</option><option value="quick9">9 点快速校准</option></select></label>
+    <label class="setting-row"><span><b>校准方案</b><small>精细方案通过验证后才保存</small></span><select id="beaconCalibrationProfile"><option value="horizontal9" selected>9 点水平校准（无需仰角）</option><option value="precision25">25 点精细校准（三维）</option><option value="quick9">9 点快速校准</option></select></label>
+    <label class="setting-row" id="beaconCalibrationYawRow"><span><b>水平采样范围</b><small>9 点 · 5 点拟合 / 4 点独立验证 · RMS ≤3° / 最大 ≤6°</small></span><select id="beaconCalibrationYawExtent"><option value="" selected disabled>请确认采样范围</option><option value="60">−60°～+60° · 间隔15°</option><option value="32">−32°～+32° · 间隔8°</option></select></label>
     <div class="cal-progress">
       <span id="beaconCalibrationProgressText">准备开始</span>
       <strong id="beaconCalibrationCounter">0 / 25</strong>
@@ -975,7 +995,7 @@ body[data-theme="light"] .media-rate-select option{color:#173040;background:#f8f
 <script src="/socket.io/socket.io.js"></script>
 <script src="js/mediamtx-webrtc-reader.js?v=1.19.2"></script>
 <script src="js/offline-satellite-map.js?v=20260825v3"></script>
-<script src="js/manta-app-transport.js?v=20261031path1"></script>
+<script src="js/manta-app-transport.js?v=radar-cal-20261101-20261031path1"></script>
 <script src="js/uwb-display-smoother.js?v=20261031radar2"></script>
 <script src="js/uwb-raw-display.js?v=20261029coherent1"></script>
 <script src="js/uwb-radar-geometry.js?v=20261031distance1"></script>
@@ -1368,7 +1388,7 @@ function renderTrackingMode(){
   $(".video-feed").classList.toggle("click-target-mode",mode==="click");
   $("#gimbalBeaconCalibration").hidden=false;
   drawGimbalOverlay();
-  if(mode!=="click")$("#trackingLabel").textContent=mode==="beacon"?localize("UWB 信标","UWB BEACON"):mode==="face"?localize("人脸","FACE"):localize("泳者","SWIMMER");
+  if(mode!=="click")$("#trackingLabel").textContent=mode==="beacon"?localize((state.trackStatus||{}).message||"UWB 信标","UWB BEACON"):mode==="face"?localize("人脸","FACE"):localize("泳者","SWIMMER");
 }
 
 function uwbFollowIsStarting(){
@@ -1461,19 +1481,31 @@ function renderBeaconCalibration(){
   var active=Boolean(cal&&cal.active),complete=Boolean(cal&&cal.status==="complete");
   profile.disabled=active||beaconCalibrationBusy;
   if(active&&cal.profile)profile.value=cal.profile;
-  var selectedTotal=profile.value==="quick9"?9:25;
+  var selectedTotal=profile.value==="precision25"?25:9;
+  $("#beaconCalibrationYawRow").hidden=profile.value!=="horizontal9";
+  $("#beaconCalibrationYawExtent").disabled=active||beaconCalibrationBusy;
+  if(cal&&cal.profiles)cal.profiles.forEach(function(p){var option=profile.querySelector('option[value="'+p.id+'"]');if(option)option.disabled=p.available===false});
+  $("#beaconCalibrationLead").textContent=profile.value==="horizontal9"?localize("只校准水平方位，俯仰保持水平。保持船体、基站和天线朝向不变，在实际使用距离逐点把信标移到画面中心并保持静止。结果需你确认后才应用。","Horizontal bearing only; pitch remains level. Keep the vessel and receiver fixed, center the beacon at each point at the intended operating distance, and hold still. Review and apply the result explicitly."):localize("三维校准需要已验证的 UWB 仰角。逐点将信标放到画面中心，计算完成后确认参数再应用。","3D calibration requires verified UWB elevation. Center the beacon at each point and confirm the computed parameters before applying.");
   if(!active&&!complete){
     $("#beaconCalibrationProgressText").textContent=cal&&cal.status==="failed"?localize("上次拟合未通过，原校准已保留","Previous fit rejected; old calibration retained"):localize("准备开始","Ready");
     $("#beaconCalibrationCounter").textContent="0 / "+selectedTotal;$("#beaconCalibrationBar").style.width="0%";
     $("#beaconCalibrationPoseTitle").textContent=localize("准备 "+selectedTotal+" 个校准点","Prepare "+selectedTotal+" calibration points");
     $("#beaconCalibrationInstruction").textContent=cal&&cal.status==="failed"?cal.message:cal&&cal.unavailableReason?cal.unavailableReason:localize("逐点将信标放在画面中心并保持静止。25 点方案须通过独立验证才会保存。","Center and hold the beacon at each point. The 25-point profile must pass independent validation before saving.");
     next.textContent=localize("开始 "+selectedTotal+" 点校准","Start "+selectedTotal+"-point calibration");
-    next.disabled=beaconCalibrationBusy||!cal||cal.available===false;cancel.hidden=false;return;
+    next.disabled=beaconCalibrationBusy||!cal||cal.available===false||(profile.value==="horizontal9"&&!$("#beaconCalibrationYawExtent").value);cancel.hidden=false;return;
   }
   var captured=Number(cal.index)||0,total=Number(cal.total)||selectedTotal;
   $("#beaconCalibrationCounter").textContent=captured+" / "+total;
   $("#beaconCalibrationBar").style.width=Math.round(captured/total*100)+"%";
   $("#beaconCalibrationProgressText").textContent=complete?localize("校准已保存","Calibration saved"):localize("第 "+(captured+1)+" 点 · "+(cal.point&&cal.point.role==="validation"?"独立验证":"拟合采样"),"Point "+(captured+1)+" · "+(cal.point&&cal.point.role==="validation"?"Validation":"Fitting"));
+  if(cal&&cal.status==="review"){
+    var fit=cal.result||{},m=fit.metrics||{},p=fit.planar_yaw_calibration;
+    $("#beaconCalibrationProgressText").textContent=localize("待确认参数，尚未保存","Review required; not saved");
+    $("#beaconCalibrationPoseTitle").textContent=localize("确认后应用校准结果","Confirm calibration parameters");
+    var parameters=p?"水平增益 "+p.gain.toFixed(6)+"；UWB 参考 "+p.azimuth_reference_deg.toFixed(3)+"°；对应云台 "+p.yaw_reference_deg.toFixed(3)+"°。 ":"外参矩阵 "+JSON.stringify((fit.extrinsic_3d||{}).matrix)+"；平移（米）"+JSON.stringify((fit.extrinsic_3d||{}).translation_m)+"。 ";
+    $("#beaconCalibrationInstruction").textContent=parameters+"拟合 RMS "+Number(m.angularRmsErrorDeg).toFixed(2)+"°；"+(m.validationPointCount?"独立验证 RMS "+Number(m.validationAngularRmsErrorDeg).toFixed(2)+"° / 最大 "+Number(m.validationAngularMaxErrorDeg).toFixed(2)+"°。":"未设置独立验证点。")+"原参数尚未修改。";
+    next.textContent=localize("确认参数并应用","Confirm and apply");next.disabled=beaconCalibrationBusy;cancel.hidden=false;return;
+  }
   if(complete){
     var metrics=(cal.result||{}).metrics||{};
     $("#beaconCalibrationPoseTitle").textContent=localize(total+" 点校准完成",total+"-point calibration complete");
@@ -1531,6 +1563,7 @@ function openBeaconCalibration(){
       if($("#beaconCalibrationModal").hidden)return;
       var incoming=payload.calibration||null;
       if(!beaconCalibration&&incoming&&incoming.status==="complete")incoming=Object.assign({},incoming,{status:"idle",index:0});
+      if(!beaconCalibration&&incoming&&!incoming.active&&incoming.defaultProfile)$("#beaconCalibrationProfile").value=incoming.defaultProfile;
       beaconCalibration=incoming;
     }).catch(function(error){showToast(error.message||"读取校准状态失败","Cannot read calibration state")}).finally(function(){beaconCalibrationBusy=false;renderBeaconCalibration()});
   }
@@ -1543,7 +1576,7 @@ function advanceBeaconCalibration(){
   var activeTransport=ensureTransport();
   if(!activeTransport||beaconCalibrationBusy)return;
   beaconCalibrationBusy=true;renderBeaconCalibration();
-  var request=beaconCalibration&&beaconCalibration.active?activeTransport.captureBeaconCalibration():activeTransport.startBeaconCalibration({profile:$("#beaconCalibrationProfile").value});
+  var request=beaconCalibration&&beaconCalibration.status==="review"?activeTransport.applyBeaconCalibration():beaconCalibration&&beaconCalibration.active?activeTransport.captureBeaconCalibration():activeTransport.startBeaconCalibration({profile:$("#beaconCalibrationProfile").value,yawExtentDeg:Number($("#beaconCalibrationYawExtent").value)});
   request.then(function(payload){beaconCalibration=payload.calibration||null}).catch(function(error){if(error.payload&&error.payload.calibration)beaconCalibration=error.payload.calibration;showToast(error.message||"校准操作失败","Calibration failed")}).finally(function(){beaconCalibrationBusy=false;renderBeaconCalibration()});
 }
 
@@ -2887,6 +2920,7 @@ if(!gimbalControlAvailable()){showToast("云台当前不可控制","Gimbal contr
   })});
   $("#beaconCalibrationNext").addEventListener("click",advanceBeaconCalibration);
   $("#beaconCalibrationProfile").addEventListener("change",renderBeaconCalibration);
+  $("#beaconCalibrationYawExtent").addEventListener("change",renderBeaconCalibration);
   $("#beaconCalibrationCancel").addEventListener("click",cancelBeaconCalibration);
   $("#beaconCalibrationClose").addEventListener("click",cancelBeaconCalibration);
   window.addEventListener("resize",drawGimbalOverlay);
@@ -2896,7 +2930,7 @@ if(!gimbalControlAvailable()){showToast("云台当前不可控制","Gimbal contr
 if(!gimbalControlAvailable()){showToast("云台当前不可控制","Gimbal control is currently unavailable");return}
 var action=b.dataset.gimbalAction;
 if(action==="record"){setRecording(!(state.recording||state.recordingPhase==="starting"))}
-else{var activeTransport=ensureTransport();if(activeTransport)activeTransport.gimbal(action).catch(function(error){showToast(error.message||"云台指令失败","Gimbal command failed")});showToast(action==="home"?localize("云台正在回中","Gimbal is centering"):localize("云台已停止","Gimbal stopped"))}
+else{var activeTransport=ensureTransport();if(activeTransport)activeTransport.gimbal(action).then(function(){state.gimbalMode="click";state.trackTarget=null;renderTrackingMode();showToast(action==="home"?localize("已发送回中，已退出跟踪","Center requested; tracking stopped"):localize("云台已停止","Gimbal stopped"))}).catch(function(error){showToast(error.message||"云台指令失败","Gimbal command failed")})}
 })});
   $("#openReport").addEventListener("click",function(){setModal("diagnosticModal",true)});
   $("#repairGimbal").addEventListener("click",recoverGimbal);

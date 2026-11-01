@@ -46,7 +46,6 @@ test("beacon toolbar exposes configurable multipoint calibration", () => {
     assert.match(serverScript, /collectBeaconCalibrationReading\(\)/);
     assert.doesNotMatch(serverScript, /uwb_raw_distance_m|rawUwbControl/);
     assert.match(serverScript, /smoothedUwbOutput\.view/);
-    assert.match(serverScript, /result\.model !== 'rigid_3d'/);
     assert.match(serverScript, /stabilizeBeaconUwb\(now,/);
 });
 

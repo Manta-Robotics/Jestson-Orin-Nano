@@ -5,17 +5,18 @@ const admitted = status => status === undefined || status === 'trusted' || statu
 
 // Calibration uses the same admitted smoothed output and clock as control.
 // An unverified vertical field cannot be used for a three-dimensional fit.
-export function calibrationUwbObservation(packet, now, key = null) {
+export function calibrationUwbObservation(packet, now, key = null, mode = 'rigid_3d') {
+  const planar = mode === 'planar_yaw';
   if (packet?.coordinateSource !== 'smoothed' || packet.smoothing?.ready !== true
     || packet.online !== true || packet.fresh !== true || !admitted(packet.measurementStatus)
-    || packet.elevationValid !== true || packet.smoothing.elevationSmoothed !== true) return null;
+    || (!planar && (packet.elevationValid !== true || packet.smoothing.elevationSmoothed !== true))) return null;
   const at = packet.measurementUpdatedAt;
   const sampleKey = JSON.stringify([packet.streamId ?? null, packet.activeReceiverIds || [],
     (packet.sensors || []).map(s => [s.receiverId, s.tagId])]);
   const distance = numeric(packet.distanceM), azimuth = numeric(packet.azimuthDeg), elevation = numeric(packet.elevationDeg);
   if (!fresh(at,now) || key !== null && sampleKey !== key || distance === null || distance <= 0
-    || azimuth === null || Math.abs(azimuth) > 180 || elevation === null || Math.abs(elevation) > 90) return null;
-  return {at, key:sampleKey, distanceM:distance, uwbAzimuthDeg:azimuth, uwbElevationDeg:elevation};
+    || azimuth === null || Math.abs(azimuth) > 180 || (!planar && (elevation === null || Math.abs(elevation) > 90))) return null;
+  return {at, key:sampleKey, distanceM:distance, uwbAzimuthDeg:azimuth, uwbElevationDeg:planar?null:elevation};
 }
 
 export function calibrationGimbalPose(feedback, point, now, required = false) {

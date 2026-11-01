@@ -103,6 +103,13 @@ export function validateSystemConfig(config) {
 
   const gimbal = isObject(config.gimbal) ? config.gimbal : {};
   const pitchHold = gimbal.beacon?.hold_pitch_deg;
+  const planarCalibration = gimbal.beacon?.planar_yaw_calibration;
+  if (planarCalibration?.enabled === true && (
+    !Number.isFinite(planarCalibration.gain) || planarCalibration.gain === 0
+    || !Number.isFinite(planarCalibration.azimuth_reference_deg)
+    || !Number.isFinite(planarCalibration.yaw_reference_deg))) {
+    errors.push('gimbal.beacon.planar_yaw_calibration requires finite reference angles and a nonzero gain');
+  }
   if (pitchHold !== undefined && (!Number.isFinite(pitchHold)
     || pitchHold < Number(gimbal.axis?.pitch_min_deg ?? -90)
     || pitchHold > Number(gimbal.axis?.pitch_max_deg ?? 90))) errors.push('gimbal.beacon.hold_pitch_deg must be a finite angle within pitch limits');

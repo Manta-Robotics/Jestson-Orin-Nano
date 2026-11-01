@@ -818,14 +818,17 @@
         }
         var endpoint = null;
         var body = payload || {};
-        if (action === "home") endpoint = "/api/gimbal/home";
+        if (action === "home") { endpoint = "/api/gimbal/home"; body = Object.assign({}, body, {preserveTracking:false}); }
         if (action === "stop") endpoint = "/api/gimbal/stop";
         if (action === "recordStart") endpoint = "/api/gimbal/recording/start";
         if (action === "recordStop") endpoint = "/api/gimbal/recording/stop";
         if (!endpoint) return Promise.reject(new Error("不支持的云台指令"));
         return postJson(endpoint, body).then(function (result) {
             this.log("COMMAND", "GIMBAL", "云台指令：" + action, "command");
-            if (result && result.state) this.emit(action === "recordStart" || action === "recordStop" ? "recordingState" : "gimbalState", result.state);
+            if (result && result.state) {
+                if (action !== "recordStart" && action !== "recordStop") this.applyGimbalTrackingState(result.state);
+                this.emit(action === "recordStart" || action === "recordStop" ? "recordingState" : "gimbalState", result.state);
+            }
             return result;
         }.bind(this));
     };
@@ -873,6 +876,8 @@
     LiveTransport.prototype.confirmImuCalibration = function (positionCode) {
         return postJson("/api/calibration/imu/confirm", { positionCode: Number(positionCode) });
     };
+
+    LiveTransport.prototype.applyBeaconCalibration = function () { return postJson("/api/gimbal/beacon/calibration/apply", {}); };
 
     LiveTransport.prototype.getRecordings = function () {
         return apiFetch("/api/gimbal/recordings", { cache: "no-store" }).then(function (response) { return response.json(); }).then(function (payload) {

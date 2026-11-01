@@ -1,4 +1,5 @@
 import { predictGimbalAnglesFromExtrinsic, predictGimbalYawFromPlanarExtrinsic } from './gimbal_beacon_geometry.js';
+import { predictPlanarCalibratedYaw } from './gimbal_planar_calibration.js';
 
 function finiteNumber(value, fallback = null) {
   if ((typeof value !== 'number' && typeof value !== 'string') || (typeof value === 'string' && value.trim() === '')) return fallback;
@@ -50,7 +51,7 @@ export function computeBeaconControl({ now = Date.now(), uwb = {}, feedback = {}
     return { valid: false, reason: 'uwb_stale', uwbAgeMs, feedbackAgeMs, rateX: 0, rateY: 0 };
   }
   if (!usePitch && (feedback.checksumValid !== true || feedback.attitudeValid === false
-    || finiteNumber(feedback.pitchDeg) === null || feedbackAgeMs > feedbackTimeoutMs)) {
+    || finiteNumber(feedback.yawDeg) === null || finiteNumber(feedback.pitchDeg) === null || feedbackAgeMs > feedbackTimeoutMs)) {
     return {valid:false, reason:'gimbal_feedback_stale', uwbAgeMs, feedbackAgeMs, rateX:0, rateY:0};
   }
   if (!absoluteAngleMode && (feedback.checksumValid !== true || finiteNumber(feedback.yawDeg) === null || (usePitch && finiteNumber(feedback.pitchDeg) === null) || feedbackAgeMs > feedbackTimeoutMs)) {
@@ -74,8 +75,9 @@ export function computeBeaconControl({ now = Date.now(), uwb = {}, feedback = {}
 
   const extrinsic = config.extrinsic_3d;
   const useExtrinsic = Boolean(extrinsic && extrinsic.enabled === true);
-  const planarYaw = useExtrinsic && !usePitch
-    ? predictGimbalYawFromPlanarExtrinsic(azimuthDeg, extrinsic) : null;
+  const calibratedPlanar = !usePitch && config.planar_yaw_calibration?.enabled === true;
+  const planarYaw = calibratedPlanar ? predictPlanarCalibratedYaw(azimuthDeg, config.planar_yaw_calibration)
+    : useExtrinsic && !usePitch ? predictGimbalYawFromPlanarExtrinsic(azimuthDeg, extrinsic) : null;
   const extrinsicPrediction = useExtrinsic && usePitch ? predictGimbalAnglesFromExtrinsic({
     distanceM: uwb.distanceM,
     azimuthDeg,
@@ -90,7 +92,7 @@ export function computeBeaconControl({ now = Date.now(), uwb = {}, feedback = {}
   const sourceTargetPitchDeg = usePitch
     ? (extrinsicPrediction ? extrinsicPrediction.pitchDeg : elevationDeg * pitchSourceSign * pitchSourceScale + pitchOffsetDeg)
     : finiteNumber(config.hold_pitch_deg, finiteNumber(feedback.pitchDeg, 0));
-  const calibrationModel = extrinsicPrediction ? 'rigid_3d' : planarYaw !== null ? 'planar_yaw' : 'legacy_angular';
+  const calibrationModel = calibratedPlanar ? 'planar_yaw_calibrated' : extrinsicPrediction ? 'rigid_3d' : planarYaw !== null ? 'planar_yaw' : 'legacy_angular';
   const boundedYaw = limits && Number.isFinite(limits.yawMinDeg) && Number.isFinite(limits.yawMaxDeg)
     && limits.yawMinDeg <= limits.yawMaxDeg && limits.yawMaxDeg - limits.yawMinDeg < 360;
   const boundedPitch = limits && Number.isFinite(limits.pitchMinDeg) && Number.isFinite(limits.pitchMaxDeg)
@@ -100,6 +102,20 @@ export function computeBeaconControl({ now = Date.now(), uwb = {}, feedback = {}
   const targetPitchDeg = boundedPitch ? clamp(sourceTargetPitchDeg, limits.pitchMinDeg, limits.pitchMaxDeg) : sourceTargetPitchDeg;
   const limited = targetYawDeg !== sourceTargetYawDeg || targetPitchDeg !== sourceTargetPitchDeg;
   if (absoluteAngleMode) {
+    const feedbackVerified = feedback.checksumValid === true && feedback.attitudeValid !== false
+      && feedbackAgeMs <= feedbackTimeoutMs && finiteNumber(feedback.yawDeg) !== null && finiteNumber(feedback.pitchDeg) !== null;
+    const measuredYawErrorDeg = feedbackVerified ? (boundedYaw ? sourceTargetYawDeg - Number(feedback.yawDeg)
+      : normalizeAngleDeg(sourceTargetYawDeg - Number(feedback.yawDeg))) : null;
+    const measuredPitchErrorDeg = feedbackVerified && usePitch ? sourceTargetPitchDeg - Number(feedback.pitchDeg) : null;
+    // Calibrated target rays refer to the optical axis at the full image center.
+    // Arrival is judged from the measured pose, never the last angle sent.
+    const centering = {
+      reference: 'full_frame_center', x: 0.5, y: 0.5,
+      horizontalErrorDeg: measuredYawErrorDeg, verticalErrorDeg: measuredPitchErrorDeg,
+      horizontalWithinTolerance: feedbackVerified && !yawUnreachable && Math.abs(measuredYawErrorDeg) <= yawDeadbandDeg,
+      verticalWithinTolerance: measuredPitchErrorDeg === null ? null : !limited && Math.abs(measuredPitchErrorDeg) <= pitchDeadbandDeg,
+      imageVerified: false
+    };
     return {
       valid: true,
       reason: 'tracking',
@@ -117,6 +133,7 @@ export function computeBeaconControl({ now = Date.now(), uwb = {}, feedback = {}
       targetYawDeg,
       targetPitchDeg,
       limited,
+      centering,
       yawDeadbandDeg,
       pitchDeadbandDeg,
       maxYawRateDps,

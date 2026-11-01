@@ -12,22 +12,23 @@ const circularMedian = values => values.reduce((best,v) => {
 }, {value:values[0],score:Infinity}).value;
 const rms = values => Math.sqrt(mean(values.map(v => v*v)));
 
-export function summarizeBeaconCalibrationReadings(readings, { minSamples = 24 } = {}) {
+export function summarizeBeaconCalibrationReadings(readings, { minSamples = 24, mode = 'rigid_3d' } = {}) {
+  const planar = mode === 'planar_yaw';
   if (!Array.isArray(readings) || readings.length < minSamples) throw new Error('Not enough distinct stable UWB observations; hold still and retry this point');
-  const keys = ['distanceM','uwbAzimuthDeg','uwbElevationDeg','gimbalYawDeg','gimbalPitchDeg','at'];
-  if (readings.some(s => keys.some(k => !Number.isFinite(s[k])) || s.distanceM <= 0 || Math.abs(s.uwbAzimuthDeg)>180 || Math.abs(s.uwbElevationDeg)>90)) throw new Error('Invalid calibration observation');
+  const keys = ['distanceM','uwbAzimuthDeg','gimbalYawDeg','gimbalPitchDeg','at',...(planar?[]:['uwbElevationDeg'])];
+  if (readings.some(s => keys.some(k => !Number.isFinite(s[k])) || s.distanceM <= 0 || Math.abs(s.uwbAzimuthDeg)>180 || (!planar && Math.abs(s.uwbElevationDeg)>90))) throw new Error('Invalid calibration observation');
   if (new Set(readings.map(s=>s.at)).size !== readings.length || new Set(readings.map(s=>s.key)).size !== 1) throw new Error('Calibration observations must use distinct frames from the same receiver and tag');
   const yaw0 = circularMedian(readings.map(s=>s.uwbAzimuthDeg));
-  const pitch0 = median(readings.map(s=>s.uwbElevationDeg));
+  const pitch0 = planar?null:median(readings.map(s=>s.uwbElevationDeg));
   const distance0 = median(readings.map(s=>s.distanceM));
   const inliers = readings.filter(s => Math.abs(wrap(s.uwbAzimuthDeg-yaw0)) <= 4
-    && Math.abs(s.uwbElevationDeg-pitch0) <= 4 && Math.abs(s.distanceM-distance0) <= Math.max(.08,distance0*.05));
+    && (planar || Math.abs(s.uwbElevationDeg-pitch0) <= 4) && Math.abs(s.distanceM-distance0) <= Math.max(.08,distance0*.05));
   if (inliers.length < minSamples || inliers.length < readings.length*.8) throw new Error('Too many UWB outliers; hold the beacon still at image center and retry this point');
   if (Math.max(...inliers.map(s=>s.at))-Math.min(...inliers.map(s=>s.at)) < 1000) throw new Error('Hold the beacon still for at least one second');
   const uwbAzimuthDeg = circularMean(inliers.map(s=>s.uwbAzimuthDeg));
-  const uwbElevationDeg = mean(inliers.map(s=>s.uwbElevationDeg));
+  const uwbElevationDeg = planar?null:mean(inliers.map(s=>s.uwbElevationDeg));
   const yawRmsDeg = rms(inliers.map(s=>wrap(s.uwbAzimuthDeg-uwbAzimuthDeg)));
-  const pitchRmsDeg = rms(inliers.map(s=>s.uwbElevationDeg-uwbElevationDeg));
+  const pitchRmsDeg = planar?null:rms(inliers.map(s=>s.uwbElevationDeg-uwbElevationDeg));
   if (yawRmsDeg > 1.5 || pitchRmsDeg > 1.5) throw new Error('UWB angles are not stable enough for precision calibration; hold still and retry this point');
   const gimbalYawDeg = circularMean(inliers.map(s=>s.gimbalYawDeg));
   const gimbalPitchDeg = mean(inliers.map(s=>s.gimbalPitchDeg));
