@@ -14,6 +14,8 @@ import bodyParser from 'body-parser';
 import dgram from 'dgram';
 import { UwbUsbWorkerSource } from './uwb_usb_worker_source.js';
 import { spawn } from 'child_process';
+import { GimbalRecording } from './gimbal_recording.js';
+import { prepareBoardShutdown, powerOffBoard } from './board_shutdown.js';
 import { createAsyncHealth } from './async_health.js';
 import net from 'net';
 import os from 'os';
@@ -556,6 +558,7 @@ let gimbalBeaconCalibrationState = {
 };
 let gimbalBeaconSourceGuard = null;
 let gimbalBeaconAbsoluteCommand = { initialized: false, yawDeg: 0, pitchDeg: 0, updatedAt: 0 };
+let gimbalBeaconTargetYawDeg = null;
 const GIMBAL_AUTO_CONNECT = gimbalConfig.auto_connect === true;
 const GIMBAL_AUTO_HOME_ON_CONNECT = gimbalConfig.auto_home_on_connect === true;
 
@@ -1712,6 +1715,7 @@ function computeGimbalBeaconDesiredRate(now) {
     uwb: guardedUwb,
     feedback: gimbalState.feedback || {},
     config: GIMBAL_BEACON_CONFIG,
+    previousTargetYawDeg: gimbalBeaconTargetYawDeg,
     limits: { yawMinDeg: GIMBAL_YAW_MIN_DEG, yawMaxDeg: GIMBAL_YAW_MAX_DEG,
       pitchMinDeg: GIMBAL_PITCH_MIN_DEG, pitchMaxDeg: GIMBAL_PITCH_MAX_DEG }
   });
@@ -1734,14 +1738,15 @@ function computeGimbalBeaconDesiredRate(now) {
     return { x: 0, y: 0, gated: true, stale: true, reason: result.reason };
   }
 
+  gimbalBeaconTargetYawDeg = result.targetYawDeg;
   if (result.controlMode === 'absolute_angle') {
     const command = slewBeaconAbsoluteCommand(result, now);
     const target = {
-      locked: true,
-      status: GIMBAL_BEACON_DRY_RUN ? 'dry_run' : 'track',
+      locked: !result.yawUnreachable,
+      status: GIMBAL_BEACON_DRY_RUN ? 'dry_run' : result.yawUnreachable ? 'yaw_limit_hold' : 'track',
       mode: 'beacon',
       controlMode: 'absolute_angle',
-      message: GIMBAL_BEACON_DRY_RUN ? 'UWB BEACON DRY RUN' : result.pitchHeld ? '水平追踪；俯仰固定水平' : 'UWB BEACON LOCKED',
+      message: GIMBAL_BEACON_DRY_RUN ? 'UWB BEACON DRY RUN' : result.yawUnreachable ? '目标超出云台范围；保持原侧限位' : result.pitchHeld ? '水平追踪；俯仰固定水平' : 'UWB BEACON LOCKED',
       pitchHeld: Boolean(result.pitchHeld),
       dryRun: GIMBAL_BEACON_DRY_RUN,
       azimuthDeg: result.azimuthDeg,
@@ -1749,6 +1754,8 @@ function computeGimbalBeaconDesiredRate(now) {
       distanceM: result.distanceM,
       calibrationModel: result.calibrationModel,
       targetYawDeg: result.targetYawDeg,
+      sourceTargetYawDeg: result.sourceTargetYawDeg,
+      yawUnreachable: result.yawUnreachable,
       targetPitchDeg: result.targetPitchDeg,
       commandYawDeg: command.yawDeg,
       commandPitchDeg: command.pitchDeg,
@@ -2881,6 +2888,7 @@ function startGimbalBeaconTracking() {
   gimbalTrackCommandPauseUntil = 0;
   gimbalBeaconSourceGuard = null;
   const feedback = gimbalState.feedback || {};
+  gimbalBeaconTargetYawDeg = Number.isFinite(feedback.yawDeg) ? feedback.yawDeg : null;
   if (feedback.checksumValid !== false && Number(feedback.updatedAt) > 0 && Date.now() - Number(feedback.updatedAt) <= 500) {
     setBeaconAbsoluteCommand(feedback.yawDeg, feedback.pitchDeg);
   } else if (!gimbalBeaconAbsoluteCommand.initialized) {
@@ -3156,8 +3164,11 @@ async function refreshHostBoardTemperature() {
   }
 }
 
-let gimbalRecordingProcess = null;
-let gimbalRecordingState = null;
+const gimbalRecorder = new GimbalRecording({
+  onChange: () => io.emit('gimbal_recording_state', buildRecordingState()),
+  log: message => addLog('GIMBAL_REC', message),
+  discardEmpty: recording => fs.rmSync(recording.path, { force: true })
+});
 
 function recordingTimestamp(date = new Date()) {
   const pad = (value) => String(value).padStart(2, '0');
@@ -3231,64 +3242,30 @@ function listGimbalRecordings(baseUrl = '') {
     .sort((a, b) => String(b.modifiedAt).localeCompare(String(a.modifiedAt)));
 }
 
-function isGimbalRecordingActive() {
-  return Boolean(gimbalRecordingProcess && gimbalRecordingProcess.exitCode === null && !gimbalRecordingProcess.killed);
-}
-
 function buildRecordingState() {
-  return {
-    active: isGimbalRecordingActive(),
-    current: gimbalRecordingState ? { ...gimbalRecordingState, path: undefined } : null,
-    directory: RECORDINGS_DIR,
-    input: GIMBAL_RECORD_INPUT
-  };
+  const state = gimbalRecorder.state();
+  return { ...state, current: state.current ? { ...state.current, path: undefined } : null,
+    directory: RECORDINGS_DIR, input: GIMBAL_RECORD_INPUT };
 }
 
 function startGimbalRecording(options = {}) {
-  if (isGimbalRecordingActive()) return { ok: true, alreadyRunning: true, recording: buildRecordingState().current };
   const outputPath = uniqueRecordingPath(options.name || recordingTimestamp());
-  const input = String(options.input || GIMBAL_RECORD_INPUT || GIMBAL_VIDEO_INPUT);
-  const useRtsp = input.startsWith('rtsp://');
-  const args = ['-hide_banner', '-loglevel', 'warning', '-y'];
-  if (useRtsp) args.push('-rtsp_transport', String(gimbalVideoConfig.rtsp_transport || 'tcp'));
+  const input = GIMBAL_RECORD_INPUT;
+  const args = ['-hide_banner', '-loglevel', 'warning', '-y', '-progress', 'pipe:1', '-nostats'];
+  if (input.startsWith('rtsp://')) args.push('-rtsp_transport', String(gimbalVideoConfig.rtsp_transport || 'tcp'));
   args.push('-i', input, '-map', '0:v:0', '-an', '-c:v', GIMBAL_RECORD_CODEC);
-  if (GIMBAL_RECORD_CODEC !== 'copy' && GIMBAL_RECORD_BITRATE) {
-    args.push('-b:v', GIMBAL_RECORD_BITRATE);
-  }
+  if (GIMBAL_RECORD_CODEC !== 'copy' && GIMBAL_RECORD_BITRATE) args.push('-b:v', GIMBAL_RECORD_BITRATE);
   args.push('-movflags', '+faststart', outputPath);
-  try {
-    const child = spawn(FFMPEG_BIN, args, { cwd: PROJECT_ROOT, stdio: ['ignore', 'ignore', 'pipe'] });
-    gimbalRecordingProcess = child;
-    gimbalRecordingState = {
-      name: path.basename(outputPath),
-      title: path.basename(outputPath, '.mp4'),
-      path: outputPath,
-      input,
-      startedAt: new Date().toISOString()
-    };
-    child.stderr.on('data', (data) => addLog('GIMBAL_REC_ERR', String(data).trimEnd()));
-    child.on('exit', (code, signalName) => {
-      addLog('GIMBAL_REC', `Recording exited code=${code} signal=${signalName || ''}`);
-      gimbalRecordingProcess = null;
-      gimbalRecordingState = null;
-      io.emit('gimbal_recording_state', buildRecordingState());
-    });
-    addLog('GIMBAL_REC', `Recording started ${outputPath}`);
-    io.emit('gimbal_recording_state', buildRecordingState());
-    return { ok: true, recording: buildRecordingState().current };
-  } catch (error) {
-    return { ok: false, error: error.message };
-  }
+  const result = gimbalRecorder.start(FFMPEG_BIN, args, {
+    name: path.basename(outputPath), title: path.basename(outputPath, '.mp4'),
+    path: outputPath, input, startedAt: new Date().toISOString()
+  }, PROJECT_ROOT);
+  return { ok: true, alreadyRunning: result.alreadyRunning, recording: buildRecordingState().current };
 }
 
-function stopGimbalRecording() {
-  if (isGimbalRecordingActive()) {
-    try { gimbalRecordingProcess.kill('SIGINT'); } catch (_) {}
-  }
+async function stopGimbalRecording() {
   const stopped = buildRecordingState().current;
-  gimbalRecordingProcess = null;
-  gimbalRecordingState = null;
-  io.emit('gimbal_recording_state', buildRecordingState());
+  await gimbalRecorder.stop();
   return { ok: true, recording: stopped };
 }
 
@@ -4645,7 +4622,7 @@ app.get('/api/status', (req, res) => {
     success: true,
     controlSession: controlAccess.state(req.controlSession, String(req.headers['x-manta-client'] || '')),
     timestamp: new Date().toISOString(),
-    data: systemState,
+    data: { ...systemState, recording: buildRecordingState() },
     limits: {
       throttle: {
         min: Math.max(ROVER_THROTTLE_MIN, -ROVER_MANUAL_THROTTLE_LIMIT),
@@ -5087,6 +5064,7 @@ app.get('/api/gimbal/recording/state', (_req, res) => {
 });
 
 app.post('/api/gimbal/recording/start', (req, res) => {
+  try {
   if (!gimbalStream || !gimbalState.connected) {
     openGimbalPort('recording');
   }
@@ -5106,15 +5084,18 @@ app.post('/api/gimbal/recording/start', (req, res) => {
     res.status(500).json({ success: false, message: result.error, state: buildRecordingState() });
     return;
   }
-  res.json({ success: true, active: true, alreadyRunning: Boolean(result.alreadyRunning), protocol, streamProfile, recording: result.recording, state: buildRecordingState() });
+  res.json({ success: true, active: buildRecordingState().active, alreadyRunning: Boolean(result.alreadyRunning), protocol, streamProfile, recording: result.recording, state: buildRecordingState() });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message, state: buildRecordingState() });
+  }
 });
 
-app.post('/api/gimbal/recording/stop', (req, res) => {
+app.post('/api/gimbal/recording/stop', async (req, res) => {
   let protocol = null;
   if (gimbalStream) {
     protocol = sendGimbalRecordCommand('stop', 'recording');
   }
-  const result = stopGimbalRecording();
+  const result = await stopGimbalRecording();
   res.json({ success: true, active: false, protocol, recording: result.recording, state: buildRecordingState(), recordings: listGimbalRecordings(publicBaseUrl(req)) });
 });
 
@@ -5527,6 +5508,25 @@ app.post('/api/calibration/imu/confirm', (req, res) => {
   });
 });
 
+let boardPowerOffPending = false;
+app.post('/api/system/shutdown', async (_req, res) => {
+  if (boardPowerOffPending) return res.status(409).json({ success: false, message: 'Board shutdown is already pending' });
+  boardPowerOffPending = true;
+  try {
+    await prepareBoardShutdown({
+      stopFollow: () => { stopUwbFollow('board_shutdown', { disarm: true }); forceNeutralRoverControl('BOARD_SHUTDOWN', 'board_shutdown'); disarmAndReturnManual('board_shutdown'); },
+      stopGimbal: () => stopGimbalSerial('board_shutdown'),
+      stopRecording: stopGimbalRecording
+    });
+    addLog('WARNING', 'Board shutdown requested from dashboard');
+    res.once('finish', () => powerOffBoard({ log: message => addLog('SYSTEM_ERR', message) }));
+    res.json({ success: true, status: 'shutting_down' });
+  } catch (error) {
+    boardPowerOffPending = false;
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
 app.post('/api/system/reboot', (req, res) => {
   addLog('WARNING', 'System reboot requested from dashboard (not implemented)');
   res.status(501).json({
@@ -5743,6 +5743,7 @@ function shutdown() {
   controlAccess.close();
   wifiDelivery.close();
   flushTelemetryCsv(true);
+  void stopGimbalRecording();
   addLog('INFO', 'Server shutting down');
   clearInterval(uwbPathTimer);
   clearInterval(uwbFollowTimer);

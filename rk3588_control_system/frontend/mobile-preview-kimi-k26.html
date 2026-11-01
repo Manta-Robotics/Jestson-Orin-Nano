@@ -577,6 +577,7 @@ body[data-theme="light"] .media-rate-select option{color:#173040;background:#f8f
         </div>
         <button class="disconnect-btn" id="claimControlButton" type="button" hidden>获取控制</button>
         <span id="controlSessionLabel"></span>
+        <button class="disconnect-btn" id="shutdownBoardButton" type="button">关闭板子</button>
         <button class="disconnect-btn" id="disconnectButton" type="button">断开</button>
       </div>
       <div class="quadrant-grid" id="quadrantGrid">
@@ -996,6 +997,7 @@ var isLocalPreview=location.protocol==="file:"||/^(4173|4175)$/.test(location.po
 var state={view:"device",connected:false,boardOnline:false,pixhawkOnline:false,imuOnline:false,motorsOnline:false,motorLinks:{left:{online:false,outputOnline:false,status:"offline"},right:{online:false,outputOnline:false,status:"offline"}},gimbalOnline:false,gimbalOutputAvailable:false,gimbalLinkStatus:"offline",controlLink:false,connection:"idle",transportMode:isLocalPreview?"mock":"live",layout:"standard",language:"zh",theme:"dark",driveMode:"manual",armed:false,flightMode:"MANUAL",latency:18,speed:0,temperature:46,attitude:{roll:1.2,pitch:-0.6,yaw:184},uwb:{online:false,fresh:false,distanceM:null,azimuthDeg:null,elevationDeg:null},ekf:{healthy:false,updatedAt:null},uwbFollow:{active:false,status:"idle",reason:"not_started",trackingMethod:"traditional",desiredSpeedMps:0},vector:{x:0,y:0},recording:false,recordingSince:0,videoLost:false,gimbalFault:false,emergency:false,downloading:false,logFilter:"all",osdEnabled:true,gimbalMode:"click",trackingActive:false,trackMode:"face",runningTrackMode:"face",trackStatus:{locked:false,status:"idle",message:"idle"},trackTarget:null,clickMarker:null,gps:{satellites:0,hdop:null,fixType:0,estimated:true},discoveredDevices:[],selectedDevice:null,calibrating:false,calibrationStarted:false,calibrationStepCode:null,calibrationStatus:"intro",calibrationConfirmed:0,calibrationProgress:0,calibrationResult:null,calibrationResultMessage:""};
 var logEntries=[];
 var seenAlertLogKeys={};
+var recordingBusy=false,recordingRevision=-1,recordingInstance=null,boardShutdownBusy=false;
 var toastTimer,recordTimerHandle,downloadTimer,telemetryTimer,mediaSeeking=false,mediaFilter="all";
 var transport=null,liveRecordings=[],gimbalModeBusy=false,beaconCalibration=null,beaconCalibrationBusy=false,gimbalWebrtcReader=null,gimbalWebrtcFallbackTimer=null,gimbalMjpegRetryTimer=null,gimbalWebrtcFallbackLogged=false,gimbalStreamGeneration=0,gimbalVideoStatus="offline",gimbalVideoTransport="";
 var offlineMap=null,mapInitStarted=false,mapProvider="offline-satellite",mapSourceLabel="板载深圳离线卫星图 · GPS：Pixhawk",mapSourceLabelEn="Offline Shenzhen satellite · GPS: Pixhawk",lastGpsSourceTimestamp=0,lastGpsReceivedAt=0;
@@ -1062,6 +1064,7 @@ function ensureTransport(){
     state.controlLink=state.boardOnline&&state.pixhawkOnline&&session.canControl===true;
     renderConnection();
   });
+  transport.on("recordingState",applyRecordingState);
   transport.on("gimbalState",function(payload){applyGimbalState(payload||{});renderHardwareStatus()});
   transport.on("gimbalTarget",function(payload){
     if(!payload||state.gimbalMode==="click")return;
@@ -1660,6 +1663,7 @@ function renderLogs(){
 function escapeHtml(v){return String(v).replace(/[&<>'"]/g,function(c){return({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"})[c]})}
 
 function renderConnection(){
+  $("#shutdownBoardButton").disabled=boardShutdownBusy||!state.connected||!pageCanControl();
   var controlButton=$("#claimControlButton"),controlLabel=$("#controlSessionLabel");
   if(controlButton){controlButton.hidden=!state.connected||state.transportMode!=="live"||pageCanControl();controlButton.disabled=Boolean(transport&&transport.controlSession&&transport.controlSession.ownerPresent);}
   if(controlLabel)controlLabel.textContent=state.connected&&state.transportMode==="live"?(pageCanControl()?localize("控制中","Controlling"):localize("只读","Read only")):"";
@@ -2208,7 +2212,7 @@ function renderHardwareStatus(){
   if($("#gimbalMetric"))$("#gimbalMetric").textContent=state.gimbalLinkStatus==="command_timeout"?"ERR":state.gimbalLinkStatus==="feedback"?"LIVE":state.gimbalOutputAvailable?"READY":"OFF";
   var imuOffline=$("#imuOffline");if(imuOffline)imuOffline.hidden=!state.connected||state.imuOnline;
   if(!state.videoLost&&!state.gimbalFault)$("#videoAlert").hidden=true;
-  $$('[data-gimbal-mode],[data-gimbal-action],#gimbalOsd').forEach(function(button){button.disabled=state.connected&&!state.gimbalOutputAvailable;if(button.id==="gimbalOsd"&&state.gimbalOsdSupported===false)button.disabled=true});
+  $$('[data-gimbal-mode],[data-gimbal-action],#gimbalOsd').forEach(function(button){button.disabled=state.connected&&!state.gimbalOutputAvailable;if(button.dataset.gimbalAction==="record")button.disabled=recordingBusy||!pageCanControl();if(button.id==="gimbalOsd"&&state.gimbalOsdSupported===false)button.disabled=true});
   function light(id,status){var item=$(id);if(item)item.dataset.state=status;}
   light("#hostLinkLight",state.connected&&state.boardOnline?"online":"offline");
   light("#pixhawkLinkLight",state.connected&&state.pixhawkOnline?"online":"offline");
@@ -2463,17 +2467,41 @@ function finishImuCalibration(success,message){
   showToast(success?"IMU 六面校准完成":"IMU 校准未完成",success?"Six-position IMU calibration complete":"IMU calibration incomplete");
 }
 
+function applyRecordingState(payload){
+  if(payload.instanceId&&payload.instanceId!==recordingInstance){recordingInstance=payload.instanceId;recordingRevision=-1}
+  if(payload.revision!==undefined&&payload.revision<recordingRevision)return;
+  if(payload.revision!==undefined)recordingRevision=payload.revision;
+  state.recording=Boolean(payload.active);state.recordingPhase=payload.phase;
+  state.recordingSince=Date.now()-Number(payload.current&&payload.current.elapsedMs||0);
+  clearInterval(recordTimerHandle);recordTimerHandle=null;
+  $("#recordTimer").hidden=!state.recording;
+  $("#recordButton").classList.toggle("active",state.recording);
+  $("#recordButton").title=payload.phase==="starting"?localize("正在启动录像，点击停止","Starting recording; click to stop"):state.recording?localize("停止录像","Stop recording"):localize("开始录像","Start recording");
+  if(state.recording){recordTimerHandle=setInterval(renderRecordTimer,500);renderRecordTimer()}
+  if(payload.error)showToast(payload.error);
+}
+
 function setRecording(active){
-  if(active===state.recording)return;
-  if(active){var activeTransport=ensureTransport();if(activeTransport)activeTransport.gimbal("recordStart").catch(function(error){showToast(error.message||"录像指令失败","Recording command failed")});state.recording=true;state.recordingSince=Date.now();$("#recordTimer").hidden=false;$("#recordButton").classList.add("active");clearInterval(recordTimerHandle);recordTimerHandle=setInterval(renderRecordTimer,500);renderRecordTimer()}
-  else stopRecording(true);
+  if(recordingBusy)return Promise.resolve();
+  recordingBusy=true;$("#recordButton").disabled=true;
+  return ensureTransport().gimbal(active?"recordStart":"recordStop").then(function(result){
+    applyRecordingState(result.state);
+    if(!active&&state.transportMode==="live")loadLiveRecordings();
+  }).catch(function(error){showToast(error.message||"录像指令失败","Recording command failed")})
+    .finally(function(){recordingBusy=false;$("#recordButton").disabled=false});
 }
 
 function stopRecording(sendCommand){
-  if(!state.recording&&!recordTimerHandle)return;
-  if(sendCommand){var activeTransport=ensureTransport();if(activeTransport)activeTransport.gimbal("recordStop").catch(function(error){showToast(error.message||"停止录像失败","Stop-recording command failed")})}
-  state.recording=false;clearInterval(recordTimerHandle);recordTimerHandle=null;
-  $("#recordTimer").hidden=true;$("#recordButton").classList.remove("active");
+  if(sendCommand)return setRecording(false);
+  recordingRevision=-1;applyRecordingState({active:false,phase:"idle"});
+}
+
+function shutdownBoard(){
+  if(boardShutdownBusy)return;
+  boardShutdownBusy=true;renderConnection();
+  return ensureTransport().shutdownBoard().then(function(){
+    showToast(state.transportMode==="live"?"已发送关机指令，板子正在关机":"模拟关机完成");
+  }).catch(function(error){boardShutdownBusy=false;renderConnection();showToast(error.message||"关机指令失败")});
 }
 
 function renderRecordTimer(){
@@ -2745,6 +2773,7 @@ function installEvents(){
     transport.claimControl().then(function(){renderConnection();showToast(localize("已获取控制权","Control acquired"));})
       .catch(function(error){showToast(error.message||localize("无法获取控制权","Cannot acquire control"));});
   });
+  $("#shutdownBoardButton").addEventListener("click",shutdownBoard);
   $("#disconnectButton").addEventListener("click",disconnect);
   $("#manualFollowButton").addEventListener("click",function(){setDriveMode("manual")});
   $("#autoFollowButton").addEventListener("click",function(){setDriveMode("auto")});
@@ -2841,7 +2870,7 @@ if(!gimbalControlAvailable()){showToast("云台当前不可控制","Gimbal contr
       activeTransport.stopUwbFollow().catch(function(error){showToast(error.message||"停止自动跟随失败")});return;
     }
     if(!state.connected||!state.controlLink){showToast("Manta控制链路未连接");return}
-    activeTransport.startUwbFollow().then(function(result){if(result&&(result.searching||result.state&&result.state.autoResumePending)){showToast(localize("正在搜索 UWB；信号稳定后自动跟随","Searching for UWB; following resumes after signal confirmation"));return}showToast(Number(state.uwb.distanceM)<1.2?"自动跟随已开启；目标小于1.2米，推进保持停止":"已按定位状态选择控制模式并武装，UWB跟随已启动")}).catch(function(error){showToast(error.message||"启动自动跟随失败")});
+    activeTransport.startUwbFollow().then(function(result){if(result&&(result.searching||result.state&&result.state.autoResumePending)){showToast(localize("正在搜索 UWB；信号稳定后自动跟随","Searching for UWB; following resumes after signal confirmation"));return}showToast(localize("UWB 自动跟随已启动","UWB following started"))}).catch(function(error){showToast(error.message||"启动自动跟随失败")});
   });
   $$("[data-tracking-method]").forEach(function(methodButton){methodButton.addEventListener("click",function(){
     var method=methodButton.dataset.trackingMethod;
@@ -2866,7 +2895,7 @@ if(!gimbalControlAvailable()){showToast("云台当前不可控制","Gimbal contr
   $$("[data-gimbal-action]").forEach(function(b){b.addEventListener("click",function(){
 if(!gimbalControlAvailable()){showToast("云台当前不可控制","Gimbal control is currently unavailable");return}
 var action=b.dataset.gimbalAction;
-if(action==="record"){setRecording(!state.recording)}
+if(action==="record"){setRecording(!(state.recording||state.recordingPhase==="starting"))}
 else{var activeTransport=ensureTransport();if(activeTransport)activeTransport.gimbal(action).catch(function(error){showToast(error.message||"云台指令失败","Gimbal command failed")});showToast(action==="home"?localize("云台正在回中","Gimbal is centering"):localize("云台已停止","Gimbal stopped"))}
 })});
   $("#openReport").addEventListener("click",function(){setModal("diagnosticModal",true)});

@@ -25,7 +25,8 @@ export class UwbUsbSource extends EventEmitter {
     this.mono = clocks.monotonic || (() => performance.now());
     this.wall = clocks.wall || (() => Date.now());
     this.captureMono = clocks.captureMonotonic || null;
-    this.smoother = new Smoother({periodMs:SAMPLE_PERIOD_MS,maxSpeedCmPerSecond:100});
+    this.smoother = new Smoother({periodMs:SAMPLE_PERIOD_MS,maxSpeedCmPerSecond:100,
+      ...(config.max_azimuth_rate_deg_s === undefined ? {} : {maxAzimuthRateDegS:config.max_azimuth_rate_deg_s})});
     this.pendingPosition = null;
     this.processedFrames = 0;
     this.rateLimitedFrames = 0;

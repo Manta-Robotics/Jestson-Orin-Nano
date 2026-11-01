@@ -21,7 +21,16 @@ function trimDeadband(errorDeg, deadbandDeg) {
   return Math.sign(errorDeg) * (magnitude - deadbandDeg);
 }
 
-export function computeBeaconControl({ now = Date.now(), uwb = {}, feedback = {}, config = {}, limits = null } = {}) {
+export function boundedBeaconYaw(sourceYawDeg, minimumDeg, maximumDeg, previousTargetYawDeg = null) {
+  if (sourceYawDeg >= minimumDeg && sourceYawDeg <= maximumDeg) return sourceYawDeg;
+  if (Number.isFinite(previousTargetYawDeg)) {
+    return Math.abs(previousTargetYawDeg - minimumDeg) < Math.abs(previousTargetYawDeg - maximumDeg)
+      ? minimumDeg : maximumDeg;
+  }
+  return clamp(sourceYawDeg, minimumDeg, maximumDeg);
+}
+
+export function computeBeaconControl({ now = Date.now(), uwb = {}, feedback = {}, config = {}, limits = null, previousTargetYawDeg = null } = {}) {
   const timeoutMs = Math.max(100, finiteNumber(config.timeout_ms, 700));
   const feedbackTimeoutMs = Math.max(100, finiteNumber(config.feedback_timeout_ms, 350));
   const uwbUpdatedAt = finiteNumber(uwb.measurementUpdatedAt === undefined ? uwb.updatedAt : uwb.measurementUpdatedAt);
@@ -86,7 +95,8 @@ export function computeBeaconControl({ now = Date.now(), uwb = {}, feedback = {}
     && limits.yawMinDeg <= limits.yawMaxDeg && limits.yawMaxDeg - limits.yawMinDeg < 360;
   const boundedPitch = limits && Number.isFinite(limits.pitchMinDeg) && Number.isFinite(limits.pitchMaxDeg)
     && limits.pitchMinDeg <= limits.pitchMaxDeg;
-  const targetYawDeg = boundedYaw ? clamp(sourceTargetYawDeg, limits.yawMinDeg, limits.yawMaxDeg) : sourceTargetYawDeg;
+  const targetYawDeg = boundedYaw ? boundedBeaconYaw(sourceTargetYawDeg, limits.yawMinDeg, limits.yawMaxDeg, previousTargetYawDeg) : sourceTargetYawDeg;
+  const yawUnreachable = boundedYaw && (sourceTargetYawDeg < limits.yawMinDeg || sourceTargetYawDeg > limits.yawMaxDeg);
   const targetPitchDeg = boundedPitch ? clamp(sourceTargetPitchDeg, limits.pitchMinDeg, limits.pitchMaxDeg) : sourceTargetPitchDeg;
   const limited = targetYawDeg !== sourceTargetYawDeg || targetPitchDeg !== sourceTargetPitchDeg;
   if (absoluteAngleMode) {
@@ -102,6 +112,8 @@ export function computeBeaconControl({ now = Date.now(), uwb = {}, feedback = {}
       elevationDeg,
       distanceM: finiteNumber(uwb.distanceM),
       calibrationModel,
+      sourceTargetYawDeg,
+      yawUnreachable,
       targetYawDeg,
       targetPitchDeg,
       limited,
@@ -131,6 +143,8 @@ export function computeBeaconControl({ now = Date.now(), uwb = {}, feedback = {}
     elevationDeg,
     distanceM: finiteNumber(uwb.distanceM),
     calibrationModel,
+    sourceTargetYawDeg,
+    yawUnreachable,
     targetYawDeg,
     targetPitchDeg,
     limited,

@@ -60,6 +60,8 @@ class UwbResponsiveSmoother {
    *   estimateXcm?:number, estimateYcm?:number, reason?:string}}
    */
   update(distanceCm, azimuthDeg, timestampMs = null) {
+    const elapsedMs = Number.isFinite(timestampMs) && this.lastTimestampMs !== null
+      ? timestampMs - this.lastTimestampMs : this.parameters.periodMs;
     const r = Number(distanceCm);
     const angle = Number(azimuthDeg);
     if (!Number.isFinite(r) || r <= 0 || !Number.isFinite(angle)) {
@@ -91,7 +93,7 @@ class UwbResponsiveSmoother {
       this.outputX = this.estimateX;
       this.outputY = this.estimateY;
     } else {
-      const dt = p.periodMs / 1000;
+      const dt = Math.max(0, Math.min(p.periodMs, elapsedMs)) / 1000;
       const alpha = 1 - Math.exp(-p.periodMs / p.estimateTauMs);
       this.estimateX += alpha * (x - this.estimateX);
       this.estimateY += alpha * (y - this.estimateY);
@@ -120,8 +122,23 @@ class UwbResponsiveSmoother {
       );
       this.velocityX += change[0];
       this.velocityY += change[1];
-      this.outputX += this.velocityX * dt;
-      this.outputY += this.velocityY * dt;
+      const previousX = this.outputX, previousY = this.outputY;
+      const candidateX = previousX + this.velocityX * dt;
+      const candidateY = previousY + this.velocityY * dt;
+      const previousAngle = Math.atan2(previousY, previousX);
+      const candidateAngle = Math.atan2(candidateY, candidateX);
+      const delta = Math.atan2(Math.sin(candidateAngle - previousAngle), Math.cos(candidateAngle - previousAngle));
+      const maxAngleStep = p.maxAzimuthRateDegS === undefined ? Infinity : p.maxAzimuthRateDegS * Math.PI / 180 * dt;
+      const angle = previousAngle + Math.max(-maxAngleStep, Math.min(maxAngleStep, delta));
+      const radius = Math.hypot(candidateX, candidateY);
+      // Limit the admitted position itself: angle, XY, display and controllers
+      // share one result. Reducing this angular step also reduces XY travel.
+      this.outputX = radius * Math.cos(angle);
+      this.outputY = radius * Math.sin(angle);
+      if (dt > 0) {
+        this.velocityX = (this.outputX - previousX) / dt;
+        this.velocityY = (this.outputY - previousY) / dt;
+      }
     }
 
     const wrappedAngle = ((Math.atan2(this.outputY, this.outputX) * 180 / Math.PI) % 360 + 360) % 360;

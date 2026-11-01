@@ -30,6 +30,10 @@ function validHttpUrl(value) {
 export function validateSystemConfig(config) {
   const errors = [];
   if (!isObject(config)) return ['root must be a JSON object'];
+  const azimuthRate = config.uwb_usb?.max_azimuth_rate_deg_s;
+  if (azimuthRate !== undefined && (!Number.isFinite(azimuthRate) || azimuthRate <= 0)) {
+    errors.push('uwb_usb.max_azimuth_rate_deg_s must be a positive number');
+  }
 
   for (const key of ['web_port', 'bridge_command_port', 'bridge_telemetry_port']) {
     if (!validPort(config[key])) errors.push(`${key} must be an integer from 1 to 65535`);

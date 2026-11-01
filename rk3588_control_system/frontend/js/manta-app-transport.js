@@ -218,6 +218,11 @@
     };
 
     MockTransport.prototype.gimbal = function (action, payload) {
+        if (action === "recordStart" || action === "recordStop") {
+            var recording = { active: action === "recordStart", phase: action === "recordStart" ? "recording" : "stopped", current: { elapsedMs: 0 } };
+            this.emit("recordingState", recording);
+            return Promise.resolve({ success: true, state: recording });
+        }
         var labels = { home: "云台回中", stop: "停止云台", recordStart: "开始录像", recordStop: "停止录像", click: "点击居中", face: "人脸跟踪", swimmer: "泳者跟踪", beacon: "UWB 信标" };
         var labelsEn = { home: "Center gimbal", stop: "Stop gimbal", recordStart: "Start recording", recordStop: "Stop recording", click: "Click to center", face: "Face tracking", swimmer: "Swimmer tracking", beacon: "UWB Beacon" };
         this.log("COMMAND", "GIMBAL", labels[action] || action, "command", labelsEn[action] || action);
@@ -434,6 +439,7 @@
             });
         }.bind(this));
         this.socket.on("rover_drive_ack", function (payload) { this.emit("driveAck", payload || {}); }.bind(this));
+        this.socket.on("gimbal_recording_state", function (state) { this.emit("recordingState", state); }.bind(this));
         this.socket.on("gimbal_state", function (state) { this.applyGimbalTrackingState(state); this.emit("gimbalState", state || {}); }.bind(this));
         this.socket.on("gimbal_target", function (target) { this.emit("gimbalTarget", target || {}); }.bind(this));
         this.socket.on("gimbal_track_status", function (status) { this.emit("gimbalTrackStatus", status || {}); }.bind(this));
@@ -531,6 +537,7 @@
         });
         if (data.telemetry) this.applyTelemetry(data.telemetry);
         if (data.gimbal) { this.applyGimbalTrackingState(data.gimbal); this.emit("gimbalState", data.gimbal); }
+        if (data.recording) this.emit("recordingState", data.recording);
         if (data.uwbFollow) this.emit("uwbFollow", data.uwbFollow);
     };
 
@@ -818,10 +825,13 @@
         if (!endpoint) return Promise.reject(new Error("不支持的云台指令"));
         return postJson(endpoint, body).then(function (result) {
             this.log("COMMAND", "GIMBAL", "云台指令：" + action, "command");
-            if (result && result.state) this.emit("gimbalState", result.state);
+            if (result && result.state) this.emit(action === "recordStart" || action === "recordStop" ? "recordingState" : "gimbalState", result.state);
             return result;
         }.bind(this));
     };
+
+    LiveTransport.prototype.shutdownBoard = function () { return postJson("/api/system/shutdown", {}); };
+    MockTransport.prototype.shutdownBoard = function () { return Promise.resolve({ success: true, status: "simulated_shutdown" }); };
 
     LiveTransport.prototype.gimbalClick = function (dx, dy) {
         return postJson("/api/gimbal/click", { dx: Math.round(Number(dx) || 0), dy: Math.round(Number(dy) || 0) }).then(function (result) {

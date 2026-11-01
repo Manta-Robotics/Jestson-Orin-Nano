@@ -354,6 +354,7 @@ export class UwbFollowController {
       this.hardStopHolding = false;
     }
     const closeApproachActive = this.config.closeApproachEnabled
+      && this.config.followingDistanceM < this.config.safetyResumeDistanceM
       && !this.hardStopHolding
       && distanceM < this.config.safetyResumeDistanceM;
     if (!this.config.hardStopEnabled) {
