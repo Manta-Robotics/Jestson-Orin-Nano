@@ -182,7 +182,7 @@
       "maximum_observed_speed_mps": 5
     },
     "relative_nmpc": {
-      "enabled": true,
+      "enabled": false,
       "horizon_s": 2.4,
       "solve_budget_ms": 15,
       "surge_time_constant_s": 1,
@@ -191,7 +191,19 @@
       "model_cruise_speed_mps": 0.8,
       "model_position_error_mps": 0.1,
       "steering_share": 0.8
-    }
+    },
+    "arc_follow": {
+      "enabled": true,
+      "radius_m": 1.5,
+      "max_speed_mps": 0.3,
+      "lookahead_m": 0.4,
+      "side_switch_margin_m": 0.6,
+      "yaw_rate_kp": 0.5,
+      "yaw_rate_ki": 0.1
+    },
+    "bearing_sign": -1,
+    "bearing_scale": 1,
+    "bearing_offset_deg": 0
   },
   "logs_dir": "./logs",
   "enable_https": false,
@@ -204,7 +216,19 @@
   "auto_start_mavlink": true,
   "debug_mode": false,
   "recordings": {
-    "dir": "./recordings/gimbal"
+    "dir": "./recordings/gimbal",
+    "segment_seconds": 120,
+    "startup_timeout_ms": 15000,
+    "stall_timeout_ms": 8000,
+    "reserve_mb": 1024,
+    "reserve_ratio": 0.05,
+    "tf_sync_enabled": true,
+    "tf_encoding": {
+      "codec": 2,
+      "width": 3840,
+      "height": 2160,
+      "bitrateKbps": 20000
+    }
   },
   "hotspot": {
     "enabled": true,
@@ -547,9 +571,14 @@
     "absolute_gate_m": 1.2,
     "max_relative_speed_mps": 6.0,
     "rejection_covariance_scale": 1.25,
-    "adaptive_enabled": true,
+    "adaptive_enabled": false,
     "occlusion_enabled": false,
     "stationary_time_constant_s": 0.4,
     "moving_time_constant_s": 0.01
+  },
+  "uwb_usb": {
+    "smoothing_enabled": false,
+    "measurement_checks_enabled": false,
+    "measurement_expiry_enabled": false
   }
 }

@@ -147,7 +147,7 @@ test('real server traditional sender uses the joystick sender and marks motor ta
     ROVER_STEERING_MIN: -45, ROVER_STEERING_MAX: 45, ROVER_MANUAL_STEERING_LIMIT: 45,
     ROVER_CONTROL_PROTOCOL: 'manual_control', ROVER_LEFT_CHANNEL: 1, ROVER_RIGHT_CHANNEL: 3,
     systemState: { telemetry: ready, isConnected: true, motorStatus: {} },
-    io: { emit() {} }, Date: class extends Date { static now() { return 5000; } },
+    emitDashboardState(){},io: { emit() {} }, Date: class extends Date { static now() { return 5000; } },
     asFiniteNumber: (x, fallback) => Number.isFinite(Number(x)) ? Number(x) : fallback,
     clamp: (x, lo, hi) => Math.min(hi, Math.max(lo, x)),
     toPwm: (x) => Math.round(Math.min(2000, Math.max(1000, x))),
