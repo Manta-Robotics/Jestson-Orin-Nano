@@ -1,8 +1,11 @@
 #!/usr/bin/env node
 
+import { ARC_FOLLOW_BOUNDS, ARC_FOLLOW_DEFAULTS } from '../backend/uwb_arc_follow.js';
+import { validateRecordingConfig } from '../backend/recording_config.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { PATH_FOLLOW_BOUNDS } from '../backend/uwb_path_follow.js';
 import { PREDICTION_DEFAULTS } from '../backend/uwb_target_prediction.js';
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
@@ -29,6 +32,14 @@ function validHttpUrl(value) {
 export function validateSystemConfig(config) {
   const errors = [];
   if (!isObject(config)) return ['root must be a JSON object'];
+  for (const key of ['measurement_checks_enabled','measurement_expiry_enabled','smoothing_enabled']) {
+    if (config.uwb_usb?.[key] !== undefined && typeof config.uwb_usb[key] !== 'boolean')
+      errors.push(`uwb_usb.${key} must be boolean`);
+  }
+  const azimuthRate = config.uwb_usb?.max_azimuth_rate_deg_s;
+  if (azimuthRate !== undefined && (!Number.isFinite(azimuthRate) || azimuthRate <= 0)) {
+    errors.push('uwb_usb.max_azimuth_rate_deg_s must be a positive number');
+  }
 
   for (const key of ['web_port', 'bridge_command_port', 'bridge_telemetry_port']) {
     if (!validPort(config[key])) errors.push(`${key} must be an integer from 1 to 65535`);
@@ -97,13 +108,24 @@ export function validateSystemConfig(config) {
   }
 
   const gimbal = isObject(config.gimbal) ? config.gimbal : {};
+  const pitchHold = gimbal.beacon?.hold_pitch_deg;
+  const planarCalibration = gimbal.beacon?.planar_yaw_calibration;
+  if (planarCalibration?.enabled === true && (
+    !Number.isFinite(planarCalibration.gain) || planarCalibration.gain === 0
+    || !Number.isFinite(planarCalibration.azimuth_reference_deg)
+    || !Number.isFinite(planarCalibration.yaw_reference_deg))) {
+    errors.push('gimbal.beacon.planar_yaw_calibration requires finite reference angles and a nonzero gain');
+  }
+  if (pitchHold !== undefined && (!Number.isFinite(pitchHold)
+    || pitchHold < Number(gimbal.axis?.pitch_min_deg ?? -90)
+    || pitchHold > Number(gimbal.axis?.pitch_max_deg ?? 90))) errors.push('gimbal.beacon.hold_pitch_deg must be a finite angle within pitch limits');
   const protocol = String(gimbal.protocol || 'ztd095').toLowerCase();
   if (!['ztd095', 'siyi'].includes(protocol)) errors.push('gimbal.protocol must be ztd095 or siyi');
   if (protocol === 'siyi') {
     if (gimbal.control_transport !== 'udp') errors.push('SIYI integration requires UDP control');
     if (gimbal.axis?.click_control_mode !== 'guided_angle') errors.push('SIYI requires guided_angle click control');
     if (Number(gimbal.axis?.yaw_min_deg) < -135 || Number(gimbal.axis?.yaw_max_deg) > 135
-      || Number(gimbal.axis?.pitch_min_deg) < -25 || Number(gimbal.axis?.pitch_max_deg) > 90)
+      || Number(gimbal.axis?.pitch_min_deg) < -90 || Number(gimbal.axis?.pitch_max_deg) > 90)
       errors.push('SIYI axis limits exceed the SDK control range');
     if (!Number.isFinite(Number(gimbal.siyi?.rate_units_per_dps)) || Number(gimbal.siyi?.rate_units_per_dps) <= 0
       || !Number.isFinite(Number(gimbal.siyi?.max_rate_command)) || Number(gimbal.siyi?.max_rate_command) <= 0
@@ -164,6 +186,32 @@ export function validateSystemConfig(config) {
   const recordings = isObject(config.recordings) ? config.recordings : {};
   if (!String(recordings.dir || '').trim()) errors.push('recordings.dir is required');
   const executionMode = config.uwb_follow?.execution_mode;
+  const arc = config.uwb_follow?.arc_follow;
+  if (arc !== undefined) {
+    if (!isObject(arc) || typeof arc.enabled !== 'boolean') errors.push('uwb_follow.arc_follow must include a boolean enabled');
+    else {
+      if (arc.enabled && executionMode !== 'relative_imu') errors.push('Arc follow requires relative_imu execution');
+      if (arc.enabled && config.uwb_follow?.bearing_scale !== 1) errors.push('Arc follow requires a periodic vessel bearing calibration (bearing_scale=1)');
+      for (const [key, [low, high]] of Object.entries(ARC_FOLLOW_BOUNDS)) {
+        if (arc[key] !== undefined && (!Number.isFinite(arc[key]) || arc[key] < low || arc[key] > high)) errors.push('Invalid arc_follow.' + key);
+      }
+      for (const key of ['transition_confirm_samples', 'side_switch_confirm_samples']) {
+        if (arc[key] !== undefined && !Number.isInteger(arc[key])) errors.push('Invalid arc_follow.' + key + ': must be an integer');
+      }
+      if ((arc.straight_reentry_bearing_deg ?? ARC_FOLLOW_DEFAULTS.straight_reentry_bearing_deg)
+        <= (arc.arc_exit_bearing_deg ?? ARC_FOLLOW_DEFAULTS.arc_exit_bearing_deg))
+        errors.push('arc_follow.straight_reentry_bearing_deg must exceed arc_exit_bearing_deg');
+    }
+  }
+  const pathFollow=config.uwb_follow?.path_follow;
+  if(pathFollow!==undefined){
+    if(!isObject(pathFollow)||typeof pathFollow.enabled!=='boolean')errors.push('uwb_follow.path_follow must include a boolean enabled');
+    else {
+      if(pathFollow.enabled&&(executionMode!=='relative_imu'||config.uwb_follow?.gps_speed_closed_loop?.enabled!==true))errors.push('Path follow requires relative_imu and GPS speed feedback');
+      for(const [key,[low,high]] of Object.entries(PATH_FOLLOW_BOUNDS))if(pathFollow[key]!==undefined&&(!Number.isFinite(pathFollow[key])||pathFollow[key]<low||pathFollow[key]>high))errors.push('Invalid path_follow.'+key);
+      if((pathFollow.lookahead_min_m??.6)>(pathFollow.lookahead_max_m??2))errors.push('Path lookahead minimum exceeds maximum');
+    }
+  }
   if (config.uwb_follow?.auto_resume_after_uwb_timeout !== undefined
     && typeof config.uwb_follow.auto_resume_after_uwb_timeout !== 'boolean') errors.push('uwb_follow.auto_resume_after_uwb_timeout must be boolean');
   if (executionMode !== undefined && !['manual', 'acro', 'relative_imu'].includes(executionMode)) errors.push('uwb_follow.execution_mode must be manual, acro or relative_imu');
@@ -247,7 +295,9 @@ export function validateSystemConfig(config) {
   }
   if (config.uwb_follow?.control_input !== undefined && !['raw', 'filtered'].includes(config.uwb_follow.control_input))
     errors.push('uwb_follow.control_input must be raw or filtered');
+  if (config.uwb_follow?.direct_control !== undefined && typeof config.uwb_follow.direct_control !== 'boolean') errors.push('uwb_follow.direct_control must be boolean');
   if (config.uwb_follow?.waiting_drift_hold !== undefined && typeof config.uwb_follow.waiting_drift_hold !== 'boolean') errors.push('uwb_follow.waiting_drift_hold must be boolean');
+  errors.push(...validateRecordingConfig(config.recordings));
   return errors;
 }
 

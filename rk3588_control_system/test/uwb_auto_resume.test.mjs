@@ -1,3 +1,4 @@
+import {LastUwbPointApproach} from '../backend/uwb_loss_policy.js';
 import {UwbGpsDriftHold} from '../backend/uwb_gps_drift_hold.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -65,7 +66,7 @@ function server(){
  const gate=new UwbAutoResume(config),controller=new UwbFollowController(config);
  const session=new IntermittentUwbFollow(config.prediction,config),commands=[];
  gate.started(packet(1000),1000);
- const box={now:1000,Date:{now:()=>box.now},uwbGpsDriftHold:new UwbGpsDriftHold(),uwbAutoResume:gate,uwbFollowController:controller,
+ const box={lastUwbPointApproach:new LastUwbPointApproach(),UWB_HOLD_ON_POSITION_LOSS:false,now:1000,Date:{now:()=>box.now},uwbGpsDriftHold:new UwbGpsDriftHold(),uwbAutoResume:gate,uwbFollowController:controller,
   intermittentUwbFollow:session,uwbFollowState:{active:true,status:'tracking'},uwbFollowControlMode:'relative_acro',
   uwbFollowTransitionId:0,uwbFollowTransitionBusy:false,uwbHoldingEnteredAt:0,uwbResumeStartedAt:0,
   uwbTrackingMethod:'traditional',UWB_FOLLOW_ENABLED:true,systemState:{isConnected:true,telemetry:packet(1000)},

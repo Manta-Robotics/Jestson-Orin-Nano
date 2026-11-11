@@ -204,6 +204,7 @@
     }
 
     function bindTransport() {
+        transport.on("recordingState", applyRecordingState);
         transport.on("log", addLog);
         transport.on("telemetry", function (telemetry) {
             if (!state.connected || state.emergency) return;
@@ -776,34 +777,63 @@
         showToast(success ? "IMU 六面校准完成" : "IMU 校准未完成", success ? "Six-position IMU calibration complete" : "IMU calibration incomplete");
     }
 
-    function setRecording(active) {
-        if (active === state.recording) return;
-        if (active) {
-            state.recording = true;
-            state.recordingSince = Date.now();
-            $("#recordTimer").hidden = false;
-            $("#recordButton").classList.add("active");
-            clearInterval(recordTimerHandle);
-            recordTimerHandle = setInterval(renderRecordTimer, 500);
-            renderRecordTimer();
-            transport.gimbal("recordStart").catch(function (error) { stopRecording(false); showToast(error.message); });
-        } else stopRecording(true);
-    }
+var recordingBusy=false,recordingInstance=null,recordingRevision=-1,recordingPastInstances=[],recordingLastError=null;
+function recordingControlAvailable(){
+  var owned=typeof pageCanControl==="function"?pageCanControl():(!transport||transport.canControl!==false);
+  return Boolean(state.connected&&state.boardOnline&&owned);
+}
 
-    function stopRecording(sendCommand) {
-        if (!state.recording && !recordTimerHandle) return;
-        state.recording = false;
-        clearInterval(recordTimerHandle);
-        recordTimerHandle = null;
-        $("#recordTimer").hidden = true;
-        $("#recordButton").classList.remove("active");
-        if (sendCommand) transport.gimbal("recordStop").catch(function (error) { showToast(error.message); });
-    }
+function applyRecordingState(payload){
+  payload=payload||{};
+  if(payload.instanceId&&payload.instanceId!==recordingInstance){
+    if(recordingPastInstances.indexOf(payload.instanceId)>=0)return;
+    if(recordingInstance)recordingPastInstances.push(recordingInstance);
+    recordingInstance=payload.instanceId;recordingRevision=-1;
+  }
+  if(payload.revision!==undefined&&payload.revision<recordingRevision)return;
+  if(payload.revision!==undefined)recordingRevision=payload.revision;
+  state.recording=Boolean(payload.active);state.recordingPhase=payload.phase||"idle";
+  state.recordingRequested=payload.desired!==undefined?Boolean(payload.desired):(state.recording||payload.phase==="starting");
+  state.recordingSince=Date.now()-Number(payload.current&&payload.current.elapsedMs||0);
+  state.recordingCamera=payload.camera||{};
+  state.recordingAny=state.recordingRequested||Boolean(state.recordingCamera.enabled&&state.recordingCamera.recording);
+  clearInterval(recordTimerHandle);recordTimerHandle=null;
+  $("#recordTimer").hidden=!state.recordingAny&&payload.phase!=="stopping";
+  $("#recordButton").classList.toggle("active",state.recordingAny);
+  $("#recordButton").dataset.recordingPhase=state.recordingPhase;
+  var labels={starting:localize("正在启动录像，点击停止","Starting; click to stop"),recovering:localize("视频中断，正在自动恢复；点击停止","Reconnecting video; click to stop"),stopping:localize("正在保存录像","Saving recording")};
+  $("#recordButton").title=labels[payload.phase]||(state.recordingAny?localize("停止录像","Stop recording"):localize("开始录像","Start recording"));
+  if(state.recordingAny||payload.phase==="stopping"){recordTimerHandle=setInterval(renderRecordTimer,500);renderRecordTimer()}
+  var recordingError=payload.error||(state.recordingCamera.enabled&&state.recordingCamera.error?localize("TF卡录像异常：","TF recording error: ")+state.recordingCamera.error:null);
+  if(recordingError&&recordingError!==recordingLastError)showToast(recordingError);
+  recordingLastError=recordingError||null;
+}
 
-    function renderRecordTimer() {
-        var elapsed = Math.floor((Date.now() - state.recordingSince) / 1000);
-        $("#recordTimer").innerHTML = "<i></i>REC " + String(Math.floor(elapsed / 60)).padStart(2, "0") + ":" + String(elapsed % 60).padStart(2, "0");
-    }
+function setRecording(active){
+  if(recordingBusy)return Promise.resolve();
+  recordingBusy=true;$("#recordButton").disabled=true;
+  return transport.gimbal(active?"recordStart":"recordStop").then(function(result){
+    if(result&&result.state)applyRecordingState(result.state);
+    if(!active&&state.transportMode==="live")loadLiveRecordings();
+  }).catch(function(error){showToast(error.message||"录像指令失败","Recording command failed")})
+    .finally(function(){recordingBusy=false;$("#recordButton").disabled=false});
+}
+
+function stopRecording(sendCommand){
+  if(sendCommand)return setRecording(false);
+  // Disconnecting the UI never changes the server's recording intent.
+  $("#recordButton").title=localize("连接已断开，录像由 Jetson 继续执行","Disconnected; Jetson continues recording");
+}
+
+function renderRecordTimer(){
+  if(!state.recordingRequested&&state.recordingCamera&&state.recordingCamera.enabled&&state.recordingCamera.recording){$("#recordTimer").textContent=localize("TF卡仍在录像，点击停止","TF recording is still active; click Stop");return}
+  var elapsed=Math.max(0,Math.floor((Date.now()-state.recordingSince)/1000));
+  var phase=state.recordingPhase;
+  var label=phase==="recovering"?localize("恢复中","RECONNECTING"):phase==="starting"?localize("启动中","STARTING"):phase==="stopping"?localize("保存中","SAVING"):"REC";
+  var camera=state.recordingCamera||{};
+  var tf=camera.enabled?(camera.phase==="recording"?" · TF ✓":localize(" · TF 未就绪"," · TF unavailable")):"";
+  $("#recordTimer").textContent=label+" "+String(Math.floor(elapsed/60)).padStart(2,"0")+":"+String(elapsed%60).padStart(2,"0")+tf;
+}
 
     function triggerGimbalFault(report, fromMonitor) {
         if (state.gimbalFault) return;
@@ -827,7 +857,7 @@
         $("#diagnosticAction").textContent = localize("停止跟踪、停止云台电机、保留主机移动控制", "Stop tracking and gimbal motors; keep vehicle drive control");
         transport.gimbal("stop").catch(function () {});
         $$("[data-gimbal-mode], [data-gimbal-action], #gimbalOsd").forEach(function (button) { button.disabled = true; });
-        if (state.recording) stopRecording(true);
+
         addLog({ level: "CRITICAL", source: "GIMBAL", message: (report.code ? report.code + " · " : "") + "已触发云台停止保护", messageEn: (report.code ? report.code + " · " : "") + "Gimbal stop protection triggered", category: "hardware" });
         if (fromMonitor) showToast("云台健康监测触发保护，请查看诊断报告");
     }
@@ -1089,8 +1119,8 @@
                 renderTelemetry();
             });
         });
-        $$("[data-gimbal-mode]").forEach(function (button) { button.addEventListener("click", function () { if (!state.controlLink || state.gimbalFault) { showToast("云台当前不可控制"); return; } $$("[data-gimbal-mode]").forEach(function (item) { item.classList.toggle("active", item === button); }); $("#trackingReticle").hidden = button.dataset.gimbalMode === "click"; transport.gimbal(button.dataset.gimbalMode).catch(function (error) { showToast(error.message); }); }); });
-        $$("[data-gimbal-action]").forEach(function (button) { button.addEventListener("click", function () { if (!state.controlLink || state.gimbalFault) { showToast("云台当前不可控制"); return; } var action = button.dataset.gimbalAction; if (action === "record") setRecording(!state.recording); else transport.gimbal(action, action === "home" ? { preserveTracking: true } : {}).then(function () { showToast(action === "home" ? "云台正在回中" : "云台已停止"); }).catch(function (error) { showToast(error.message); }); }); });
+        $$("[data-gimbal-mode]").forEach(function (button) { button.addEventListener("click", function () { if (button.dataset.gimbalAction === "record") { if (recordingControlAvailable()) setRecording(!state.recordingAny); else showToast("请先连接并获取控制权"); return; } if (!state.controlLink || state.gimbalFault) { showToast("云台当前不可控制"); return; } $$("[data-gimbal-mode]").forEach(function (item) { item.classList.toggle("active", item === button); }); $("#trackingReticle").hidden = button.dataset.gimbalMode === "click"; transport.gimbal(button.dataset.gimbalMode).catch(function (error) { showToast(error.message); }); }); });
+        $$("[data-gimbal-action]").forEach(function (button) { button.addEventListener("click", function () { if (!state.controlLink || state.gimbalFault) { showToast("云台当前不可控制"); return; } var action = button.dataset.gimbalAction; if (action === "record") setRecording(!state.recordingRequested); else transport.gimbal(action, action === "home" ? { preserveTracking: true } : {}).then(function () { showToast(action === "home" ? "云台正在回中" : "云台已停止"); }).catch(function (error) { showToast(error.message); }); }); });
         $("#openReport").addEventListener("click", function () { setModal("diagnosticModal", true); });
         $("#gimbalOsd").addEventListener("click", toggleGimbalOsd);
         $("#imuCalibrate").addEventListener("click", openImuCalibrationWizard);
