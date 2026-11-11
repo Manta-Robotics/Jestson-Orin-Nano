@@ -20,6 +20,7 @@
     var stopBusy = false;
     var homeBusy = false;
     var recordingActive = false;
+    var recordingPhase = "idle";
     var recordingName = "";
     var connected = false;
     var videoTransport = "rtsp";
@@ -147,7 +148,7 @@
         }
         var recordBtn = $("gimbalRecordToggle");
         if (recordBtn) {
-            recordBtn.textContent = recordBusy ? "Working..." : (recordingActive ? "Stop Recording" : "Record");
+            recordBtn.textContent = recordBusy ? "Working..." : (recordingPhase === "starting" ? "Starting (Stop)" : recordingActive ? "Stop Recording" : "Record");
             recordBtn.classList.toggle("active", recordingActive);
             recordBtn.disabled = recordBusy;
             recordBtn.title = recordingActive && recordingName ? recordingName : "Record clean gimbal video";
@@ -241,7 +242,7 @@
             .then(function (r) { return r.json(); })
             .then(function (body) {
                 var state = body && body.state ? body.state : {};
-                recordingActive = Boolean(state.active);
+                recordingActive = Boolean(state.desired ?? state.active); recordingPhase = state.phase;
                 recordingName = state.current && state.current.name ? state.current.name : "";
                 renderControls();
             })
@@ -473,10 +474,10 @@
         if (recordBusy) return;
         recordBusy = true;
         renderControls();
-        postJson(recordingActive ? "/api/gimbal/recording/stop" : "/api/gimbal/recording/start", {})
+        postJson(recordingActive || recordingPhase === "starting" ? "/api/gimbal/recording/stop" : "/api/gimbal/recording/start", {})
             .then(function (body) {
                 var state = body && body.state ? body.state : {};
-                recordingActive = Boolean(state.active);
+                recordingActive = Boolean(state.desired ?? state.active); recordingPhase = state.phase;
                 recordingName = state.current && state.current.name ? state.current.name : (body && body.recording && body.recording.name ? body.recording.name : "");
                 renderControls();
             })
@@ -528,7 +529,7 @@
             drawOverlay();
         });
         socket.on("gimbal_recording_state", function (state) {
-            recordingActive = Boolean(state && state.active);
+            recordingActive = Boolean(state && (state.desired ?? state.active)); recordingPhase = state && state.phase;
             recordingName = state && state.current && state.current.name ? state.current.name : "";
             renderControls();
         });

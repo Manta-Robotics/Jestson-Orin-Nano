@@ -23,7 +23,7 @@ function sender(manualLimit=100) {
     ROVER_STEERING_MIN:-45,ROVER_STEERING_MAX:45,ROVER_MANUAL_STEERING_LIMIT:45,
     ROVER_CONTROL_PROTOCOL:'manual_control',ROVER_LEFT_CHANNEL:1,ROVER_RIGHT_CHANNEL:3,
     Date:class extends Date {static now(){return now;}},
-    systemState:{isConnected:true,telemetry:{flightMode:'MANUAL',armed:true,pilotSteering:{ready:true,type:0}},motorStatus:{}},io:{emit(){}},
+    systemState:{isConnected:true,telemetry:{flightMode:'MANUAL',armed:true,pilotSteering:{ready:true,type:0}},motorStatus:{}},emitDashboardState(){},io:{emit(){}},
     forceNeutralRoverControl(){},
     asFiniteNumber:(v,f)=>Number.isFinite(Number(v))?Number(v):f,
     clamp:(v,a,b)=>Math.max(a,Math.min(b,v)),toPwm:v=>Math.round(Math.max(1000,Math.min(2000,v))),

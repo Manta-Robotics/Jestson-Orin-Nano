@@ -9,6 +9,7 @@ Responsibilities:
 """
 
 import json
+from arming_feedback import ArmingFeedback
 import logging
 import math
 import os
@@ -19,6 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from experiment_tap import record_mavlink
 from uwb_fusion import DualUwbFusion
 from uwb_measurement_filter import GatedUwbKalman, DEFAULTS as UWB_FILTER_DEFAULTS
 from rover_pilot_mapping import motor_target_axes, valid_pilot_type
@@ -307,7 +309,8 @@ class MAVLinkBridge:
             switch_confirm_ms=uwb_dual_config.get('switch_confirm_ms', 180),
             switch_blend_ms=uwb_dual_config.get('switch_blend_ms', 180),
             enabled_receiver_ids=uwb_dual_config.get('enabled_receiver_ids', (1, 2)),
-            require_gated_measurements=self.uwb_filter_enabled,
+            require_gated_measurements=True,
+            ordered_observations=True,
         )
         self._uwb_measurement_filters = {
             receiver_id: GatedUwbKalman(
@@ -364,6 +367,8 @@ class MAVLinkBridge:
         self._last_battery_state = 'UNKNOWN'
         self._last_gps_fix_reported: Optional[bool] = None
         self._last_log_sent_at: Dict[str, float] = {}
+        self._propulsion_lease = None
+        self.command_timeout_s = 0.35
 
     def _param_name(self, raw_name: Any) -> str:
         if isinstance(raw_name, bytes):
@@ -397,12 +402,19 @@ class MAVLinkBridge:
         sample_time_boot_ms: Optional[int] = None,
     ) -> None:
         now_ms = int(time.time() * 1000)
-        updated = self.uwb_fusion.update(name, value, source=source, now_ms=now_ms)
+        updated = self.uwb_fusion.update(name, value, source=source, now_ms=now_ms,
+            sample_time_boot_ms=sample_time_boot_ms)
         if updated is None:
             parsed = self.uwb_fusion.parse_name(name)
-            if self.uwb_filter_enabled and parsed and parsed[1] in ('DIST', 'AZ', 'EL') and not math.isfinite(value):
+            if parsed and parsed[1] in ('DIST', 'AZ', 'EL') and not math.isfinite(value):
                 receiver_id = parsed[0] or self.uwb_fusion._legacy_receiver(source)
-                result = self._uwb_measurement_filters[receiver_id].reject(now_ms, 'non_finite_measurement')
+                if self.uwb_filter_enabled:
+                    result = self._uwb_measurement_filters[receiver_id].reject(now_ms, 'non_finite_measurement')
+                else:
+                    receiver = self.uwb_fusion.receivers[receiver_id]
+                    receiver.pending_distance = receiver.pending_azimuth = False
+                    receiver.rejected_count += 1
+                    result = dict(accepted=False, status='suspect', reason='non_finite_measurement')
                 self.uwb_fusion.apply_measurement_result(receiver_id, result)
                 self._refresh_uwb_fusion()
             return
@@ -435,11 +447,30 @@ class MAVLinkBridge:
                 self.uwb_fusion.set_filtered(receiver_id, 'EL', value)
             self._refresh_uwb_fusion()
             return
-        if field_name in {'GOOD', 'VALID', 'SEQ', 'ANCH', 'TAG', 'STAT', 'RX', 'HB', 'CRC', 'LEN', 'SENT', 'AVL', 'REJECTED'}:
-            self._refresh_uwb_fusion()
-            return
-        filtered = self._uwb_filters[(receiver_id, field_name)].update(value)
-        self.uwb_fusion.set_filtered(receiver_id, field_name, filtered)
+        receiver = self.uwb_fusion.receivers[receiver_id]
+        reason = None
+        complete = (field_name in ('DIST', 'AZ') and receiver.received_measurement_at == now_ms
+                    and not receiver.pending_distance and not receiver.pending_azimuth)
+        if field_name == 'REJECTED':
+            reason = receiver.invalid_reason
+        elif field_name == 'VALID' and receiver.valid is False:
+            reason = 'radio_invalid'
+        elif complete and receiver.valid is False:
+            reason = 'radio_invalid'
+        elif complete and abs(receiver.raw_azimuth_deg) > self.uwb_fusion.receiver_fov_half_deg:
+            reason = 'outside_receiver_fov'
+        if reason:
+            self.uwb_fusion.apply_measurement_result(receiver_id,
+                dict(accepted=False, status='suspect', reason=reason))
+        elif complete:
+            # Raw passthrough: no CV, scalar Kalman or adaptive angle filter.
+            self.uwb_fusion.apply_measurement_result(receiver_id, dict(
+                accepted=True, status='trusted', reason='filter_disabled',
+                distance_m=receiver.raw_distance_m, azimuth_deg=receiver.raw_azimuth_deg,
+                accepted_at=receiver.received_measurement_at,
+                angular_filter_mode='disabled', smoothing_displacement_m=0.0))
+        elif field_name == 'EL' and abs(value) <= 90:
+            self.uwb_fusion.set_filtered(receiver_id, 'EL', value)
         self._refresh_uwb_fusion()
 
     def _refresh_uwb_fusion(self) -> None:
@@ -519,6 +550,7 @@ class MAVLinkBridge:
             getattr(mavutil.mavlink, 'MAVLINK_MSG_ID_SYS_STATUS', 1): 5.0,
             getattr(mavutil.mavlink, 'MAVLINK_MSG_ID_EKF_STATUS_REPORT', 193): 5.0,
             getattr(mavutil.mavlink, 'MAVLINK_MSG_ID_HIGHRES_IMU', 105): 10.0,
+            getattr(mavutil.mavlink, 'MAVLINK_MSG_ID_SCALED_IMU', 26): 20.0,
         }
 
         esc_groups = {
@@ -740,6 +772,12 @@ class MAVLinkBridge:
         except Exception as exc:
             logger.debug('Failed to send packet to node: %s', exc)
 
+    @property
+    def arming_feedback(self):
+        if not hasattr(self, '_arming_feedback'):
+            self._arming_feedback = ArmingFeedback(self._send_node_packet)
+        return self._arming_feedback
+
     def _send_node_log(self, level: str, message: str, key: Optional[str] = None, min_interval: float = 0.0) -> None:
         now = time.time()
         log_key = key or f'{level}:{message}'
@@ -942,7 +980,7 @@ class MAVLinkBridge:
             logger.error('Failed to send rover body velocity/yaw-rate: %s', exc)
             return False
 
-    def _arm_disarm(self, arm: bool) -> bool:
+    def _arm_disarm(self, arm: bool, request_id=None) -> bool:
         if self.master is None:
             return False
         try:
@@ -959,6 +997,7 @@ class MAVLinkBridge:
                 0,
                 0,
             )
+            self.arming_feedback.requested(arm, request_id)
             logger.info('%s command sent', 'ARM' if arm else 'DISARM')
             return True
         except Exception as exc:
@@ -1316,6 +1355,26 @@ class MAVLinkBridge:
         if channel_has_feedback(self.rover_right_output_channel):
             self.flight_data.motor_right_esc_updated_at = now_ms
 
+    def _remember_propulsion(self, kind, first, second, sent):
+        if sent:
+            self._propulsion_lease = (kind, time.monotonic()) if first != 0 or second != 0 else None
+
+    def _expire_propulsion_lease(self, force=False, now=None):
+        lease = getattr(self, '_propulsion_lease', None)
+        if lease is None:
+            return False
+        now = time.monotonic() if now is None else now
+        if not force and now - lease[1] <= getattr(self, 'command_timeout_s', .35):
+            return False
+        # Stop using the active protocol: MANUAL_CONTROL alone cannot clear a
+        # velocity target retained by GUIDED mode. Clear before calling a sender.
+        self._propulsion_lease = None
+        sender = {'drive': self._send_rover_drive, 'acro': self._send_rover_acro,
+                  'ned': self._send_rover_velocity_ned, 'body': self._send_rover_body_velocity}[lease[0]]
+        sender(0.0, 0.0)
+        logger.warning('Propulsion command lease expired; neutral command sent')
+        return True
+
     def _handle_command_packet(self, raw_data: bytes) -> None:
         try:
             packet = json.loads(raw_data.decode('utf-8'))
@@ -1323,12 +1382,36 @@ class MAVLinkBridge:
             logger.error('Invalid command packet: %s', exc)
             return
 
+        if not isinstance(packet, dict) or not isinstance(packet.get('params', {}), dict):
+            logger.warning('Ignored malformed command object')
+            return
         command = str(packet.get('command', '')).upper().strip()
         params = packet.get('params', {}) or {}
+        motion_fields = {
+            'ROVER_DRIVE': ('throttle', 'steering', 'throttlePwm', 'steeringPwm'),
+            'ROVER_ACRO': ('forwardSpeedMps', 'yawRateDegS'),
+            'ROVER_VELOCITY_NED': ('vx', 'vy'),
+            'ROVER_BODY_VELOCITY': ('forwardSpeedMps', 'yawRateRadS'),
+        }
+        fields = motion_fields.get(command, ())
+        if any(isinstance(params[key], bool) or not isinstance(params[key], (int, float))
+               or not math.isfinite(params[key]) for key in fields if key in params):
+            logger.warning('Ignored invalid numeric propulsion command')
+            return
+        if fields and 'timestamp' in packet:
+            stamp = packet['timestamp']
+            if isinstance(stamp, bool) or not isinstance(stamp, (int, float)) or not math.isfinite(stamp):
+                return
+            age = time.time() - stamp / 1000.0
+            nonneutral = any(params.get(key, 0) != 0 for key in fields)
+            if nonneutral and (age < -.1 or age > getattr(self, 'command_timeout_s', .35)):
+                logger.warning('Ignored expired propulsion command')
+                return
 
         if command == 'ROVER_ACRO':
             try:
-                self._send_rover_acro(float(params.get('forwardSpeedMps', 0)), float(params.get('yawRateDegS', 0)))
+                first, second = float(params.get('forwardSpeedMps', 0)), float(params.get('yawRateDegS', 0))
+                self._remember_propulsion('acro', first, second, self._send_rover_acro(first, second))
             except (ValueError, TypeError):
                 self._send_rover_drive(0.0, 0.0)
             return
@@ -1351,21 +1434,18 @@ class MAVLinkBridge:
                 steering = self.rover_steering_min + (steering_pwm - 1000) * (
                     self.rover_steering_max - self.rover_steering_min
                 ) / 1000.0
-            self._send_rover_drive(throttle, steering, bool(params.get('motorTargetSemantics', False)))
+            self._remember_propulsion('drive', throttle, steering,
+                                     self._send_rover_drive(throttle, steering, params.get('motorTargetSemantics') is True))
             return
 
         if command == 'ROVER_VELOCITY_NED':
-            self._send_rover_velocity_ned(
-                float(params.get('vx', 0.0)),
-                float(params.get('vy', 0.0)),
-            )
+            first, second = float(params.get('vx', 0.0)), float(params.get('vy', 0.0))
+            self._remember_propulsion('ned', first, second, self._send_rover_velocity_ned(first, second))
             return
 
         if command == 'ROVER_BODY_VELOCITY':
-            self._send_rover_body_velocity(
-                float(params.get('forwardSpeedMps', 0.0)),
-                float(params.get('yawRateRadS', 0.0)),
-            )
+            first, second = float(params.get('forwardSpeedMps', 0.0)), float(params.get('yawRateRadS', 0.0))
+            self._remember_propulsion('body', first, second, self._send_rover_body_velocity(first, second))
             return
 
         if command == 'SET_MODE':
@@ -1373,11 +1453,12 @@ class MAVLinkBridge:
             return
 
         if command == 'ARM':
-            self._arm_disarm(True)
+            self._arm_disarm(True, params.get('requestId'))
             return
 
         if command == 'DISARM':
-            self._arm_disarm(False)
+            self._expire_propulsion_lease(force=True)
+            self._arm_disarm(False, params.get('requestId'))
             return
 
         if command == 'IMU_CALIBRATION_START':
@@ -1391,6 +1472,8 @@ class MAVLinkBridge:
             return
 
         if command == 'EMERGENCY_STOP':
+            self._expire_propulsion_lease(force=True)
+            self._propulsion_lease = None
             self._send_rover_drive(0.0, 0.0)
             self._arm_disarm(False)
             return
@@ -1410,6 +1493,7 @@ class MAVLinkBridge:
             self._handle_command_packet(raw_data)
 
     def _parse_message(self, msg: Any) -> None:
+        record_mavlink(msg, self.target_system, self.target_component)
         msg_type = msg.get_type()
 
         if msg_type == 'PARAM_VALUE':
@@ -1434,6 +1518,8 @@ class MAVLinkBridge:
                 return
             self._last_fcu_heartbeat_at = time.time()
             self.flight_data.armed = bool(getattr(msg, 'base_mode', 0) & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
+            if self.flight_data.armed:
+                self.arming_feedback.armed()
             self.flight_data.flight_mode = mavutil.mode_string_v10(msg)
             status_code = int(getattr(msg, 'system_status', 0))
             status_enum = mavutil.mavlink.enums.get('MAV_STATE', {}).get(status_code)
@@ -1584,7 +1670,11 @@ class MAVLinkBridge:
             command = int(getattr(msg, 'command', 0) or 0)
             result = int(getattr(msg, 'result', 0) or 0)
             if command == mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM:
+                if (msg.get_srcSystem() != self.target_system
+                        or msg.get_srcComponent() != self.target_component):
+                    return
                 result_name = self._mav_result_name(result)
+                self.arming_feedback.acknowledged(result, result_name)
                 logger.info('ARM/DISARM ACK: %s (%d)', result_name, result)
                 self._send_node_log(
                     'INFO' if result == MAV_RESULT_ACCEPTED else 'WARNING',
@@ -1622,6 +1712,9 @@ class MAVLinkBridge:
             )
 
         elif msg_type == 'STATUSTEXT':
+            if (msg.get_srcSystem() != self.target_system
+                    or msg.get_srcComponent() != self.target_component):
+                return
             raw_text = getattr(msg, 'text', '')
             if isinstance(raw_text, bytes):
                 text = raw_text.decode('utf-8', errors='ignore').strip('\x00 ').strip()
@@ -1639,6 +1732,7 @@ class MAVLinkBridge:
                 else:
                     level = 'DEBUG'
 
+                self.arming_feedback.status_text(text)
                 self._send_node_log(level, f'FCU: {text}', key=f'statustext:{text}', min_interval=2.0)
 
                 lower_text = text.lower()
@@ -1745,7 +1839,7 @@ class MAVLinkBridge:
                 if self.uwb_fusion.enabled_receiver_ids == {2}
                 else 'TELEM1_TELEM2_NAMED_VALUE_FLOAT'
             ),
-            'filter': 'raw_validation_innovation_gate_cv_kalman_then_fusion' if self.uwb_filter_enabled else 'fast_per_receiver_kalman_then_body_xy_fusion',
+            'filter': 'raw_validation_innovation_gate_cv_kalman_then_fusion' if self.uwb_filter_enabled else 'raw_passthrough_then_body_xy_fusion',
             'measurementStatus': 'trusted' if uwb_fresh else 'suspect' if any(s.get('measurementStatus') == 'suspect' for s in fused_uwb['sensors']) else 'unavailable',
             'rejectionReason': None if uwb_fresh else next((s.get('filterReason') for s in fused_uwb['sensors'] if s.get('measurementStatus') == 'suspect'), None),
             'measurementNis': max((s['filterNis'] for s in fused_uwb['sensors'] if s.get('filterNis') is not None and (not uwb_fresh or s['receiverId'] in fused_uwb['active_receiver_ids'])), default=None),
@@ -1872,6 +1966,7 @@ class MAVLinkBridge:
 
                 self._poll_mavlink()
                 self._poll_commands()
+                self._expire_propulsion_lease()
                 self._poll_mission_planner()
                 self._request_pilot_steer_type()
                 self._request_acro_parameters()
@@ -1897,6 +1992,7 @@ class MAVLinkBridge:
         except KeyboardInterrupt:
             logger.info('Keyboard interrupt received, stopping bridge')
         finally:
+            self._expire_propulsion_lease(force=True)
             self.disconnect()
 
 
@@ -1944,6 +2040,7 @@ def main() -> None:
             mission_planner_tcp_config=mission_planner_tcp_config,
         )
 
+        bridge.command_timeout_s = max(.2, float(config.get('rover_command_timeout_ms', 350)) / 1000.0)
         if bridge.connect(timeout=8.0):
             bridge.run()
             logger.warning('Bridge disconnected from Pixhawk, retrying in 2 seconds...')
