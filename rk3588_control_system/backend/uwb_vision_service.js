@@ -52,6 +52,12 @@ export function installUwbVisionApi(app, { filename, getInputs, model = '', defa
         enabled = req.body.enabled;
         return res.json(read());
     });
-    return { read, get followSource() { return followSource; }, guidance: now => followSource === 'uwb+vision' ? evaluate(now) : null,
+    function checkAssociation(now, sample) {
+        if (!config.calibrated || !sample) return 'unavailable';
+        const inputs = getInputs(now);
+        return evaluateUwbVision({...inputs,now,enabled:true,config,trackerActive:true,
+            target:sample.target,pose:sample.pose}).status;
+    }
+    return { read, checkAssociation, get followSource() { return followSource; }, guidance: now => followSource === 'uwb+vision' ? evaluate(now) : null,
         stop: () => selectSource('uwb') };
 }

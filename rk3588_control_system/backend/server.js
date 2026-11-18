@@ -10,6 +10,9 @@ import { randomUUID } from 'node:crypto';
 
 import express from 'express';
 import { installCinematographyApi } from './cinematography_api.js';
+import { CinematographySession } from './cinematography_session.js';
+import { CinematographyExecutor, composeCinemaGimbalRate } from './cinematography_executor.js';
+import { openCinemaPolicy, readCinemaFrame } from './cinematography_worker.js';
 import { ExperimentLive } from './experiment_live.js';
 import { ExperimentJournal } from './experiment_journal.js';
 import { readExperimentLoggerConfig, installExperimentHistory } from './experiment_history.js';
@@ -335,7 +338,7 @@ function emitDashboardState(event, value, options) {
   if(event==='uwb_follow_update'||event==='gimbal_state')refreshExperimentModes();
   if(event==='rover_control_update'&&[value.leftPwm,value.rightPwm].every(Number.isFinite)){
     const origin=String(value.source??'').toUpperCase();
-    if(origin)experimentLive.modes({control_owner:origin.startsWith('UWB')?'uwb':/WEB|SOCKET|MANUAL/.test(origin)?'manual':'other'});
+    if(origin)experimentLive.modes({control_owner:origin==='PPO'?'ppo':origin.startsWith('UWB')?'uwb':/WEB|SOCKET|MANUAL/.test(origin)?'manual':'other'});
   }
   emitWifiAwareState(io, wifiDelivery, event, value, options);
 }
@@ -343,6 +346,7 @@ function emitDashboardState(event, value, options) {
 const controlAccess = createControlAccess({
   pin: loadControlPin(PROJECT_ROOT),
   onControlLost(reason) {
+    if (cinema.active) cinema.stop('控制端已断开');
     if (reason === 'transport_lost') {
       if (uwbFollowState.active || uwbFollowTransitionBusy || uwbAutoResume.pending) return true;
       const current = systemState.roverControl || {}, target = manualRoverSlew.target || {};
@@ -1031,7 +1035,67 @@ app.use(bodyParser.json({ limit: '1mb', inflate: false }));
 app.use(bodyParser.urlencoded({ extended: true, limit: '64kb', parameterLimit: 100, inflate: false }));
 controlAccess.installRoutes(app);
 app.use('/api', controlAccess.middleware);
-installCinematographyApi(app);
+const cinemaExecutor = new CinematographyExecutor(uwbControllerConfig);
+const cinema = new CinematographySession({
+  blocker: cinemaBlocker,
+  leaseMs: ROVER_COMMAND_TIMEOUT_MS,
+  reset: () => cinemaExecutor.reset(),
+  openPolicy: callbacks => openCinemaPolicy(PROJECT_ROOT, callbacks),
+  frame: id => readCinemaFrame(frameBroker,id),
+  camera(visual) {
+    const result = visual ? startGimbalTracking({mode:'swimmer',cinema:true}) : startGimbalBeaconTracking();
+    if (!result.ok) throw new Error(result.error);
+  },
+  releaseCamera() {
+    stopGimbalTracking(true);
+    // Late exit/FRAME_RESULT from a retired swimmer must not stop a new beacon session.
+    if (gimbalTrackProcess?.killed) gimbalTrackProcess = null;
+    swimmerVisionSample = null;
+  },
+  neutral: reason => forceNeutralRoverControl('PPO',reason),
+  event(type, detail) {
+    experimentLive.event('cinematography',type,{frame_id:detail.frame_id ?? null},detail);
+    if (type !== 'decision' && type !== 'execution') addLog('CINEMATOGRAPHY',type+' '+(detail.reason || ''));
+  },
+  execute(decision, ageMs) {
+    const now = Date.now();
+    const result = cinemaExecutor.step({now,telemetry:sharedUwbControlTelemetry(now),connected:systemState.isConnected,
+      decision,decisionAt:now-ageMs,gimbalYawDeg:gimbalState.feedback?.yawDeg});
+    if (result.safe) {
+      sendManualRoverOutput({throttle:result.throttlePercent,steering:result.steeringDegrees}, 'PPO');
+      lastRoverCommandAt = now;
+    }
+    return result;
+  }
+});
+function cinemaBlocker(running = false) {
+  if (SIMULATION_MODE) return '本地 SITL 未连接运镜相机';
+  if (uwbFollowState.active || uwbFollowTransitionBusy || uwbAutoResume.pending || isVisionActive())
+    return '请先停止其他船体跟随';
+  if (!running && (gimbalState.trackingActive || isBeaconCalibrationActive())) return '请先停止云台跟踪或校准';
+  if (boardPowerOffPending || systemState.telemetry.imuCalibration?.active) return '板端正在关机或校准';
+  if (UWB_USB_ENABLED && config.uwb_usb.vessel_control_enabled !== true) return '当前 USB UWB 配置仅允许控制云台';
+  if (GIMBAL_BEACON_CONFIG.enabled === false || GIMBAL_BEACON_DRY_RUN ||
+      (IS_SIYI && GIMBAL_BEACON_CONFIG.calibration_required === true)) return '请先完成云台 UWB 标定并启用实际跟踪';
+  const now = Date.now(), feedback = gimbalState.feedback;
+  if (!gimbalState.connected || feedback?.checksumValid !== true || feedback.attitudeValid === false ||
+      ![feedback.updatedAt,feedback.yawDeg,feedback.pitchDeg].every(Number.isFinite) ||
+      now < feedback.updatedAt || now-feedback.updatedAt > 300) return '等待新鲜的云台姿态';
+  const preflight = cinemaExecutor.preflight({now,telemetry:sharedUwbControlTelemetry(now),connected:systemState.isConnected});
+  if (!preflight.safe) return preflight.reason;
+  if (systemState.telemetry.armed !== true || String(systemState.telemetry.flightMode).toUpperCase() !== 'MANUAL')
+    return '请将飞控设为 MANUAL 并解锁船体';
+  return null;
+}
+installCinematographyApi(app, cinema);
+app.use('/api', (req,res,next) => {
+  if (!cinema.active || req.method !== 'POST') return next();
+  if (/^\/(uwb-follow|uwb-vision|vision|calibration)\//.test(req.path) ||
+      (req.path.startsWith('/gimbal/') && !req.path.startsWith('/gimbal/recording/'))) {
+    return res.status(409).json({success:false,code:'CINEMATOGRAPHY_ACTIVE',message:'请先停止自主运镜'});
+  }
+  next();
+});
 app.use('/api',modeMiddleware(experimentLive,refreshExperimentModes));
 app.get('/api/experiments/live',(_req,res)=>res.json({success:true,data:experimentLive.snapshot()}));
 for(const action of ['start','stop']){
@@ -1946,6 +2010,20 @@ function computeGimbalBeaconDesiredRate(now) {
 }
 
 function computeActiveGimbalDesiredRate(now) {
+  if (cinema.active) {
+    if (!cinema.execution?.safe) return {x:0,y:0,stale:true,gated:true};
+    const sample = swimmerVisionSample;
+    const observationAt = sample?.target?.timestamp;
+    const visualRecent = cinema.visual && cinema.targetState === 'detected' && gimbalTrackTarget &&
+      !gimbalTrackTarget.coasting && Number.isFinite(observationAt) && now >= observationAt &&
+      now-observationAt <= GIMBAL_TRACK_TARGET_TIMEOUT_MS;
+    const measured = visualRecent && uwbVisionService.checkAssociation(now,sample) !== 'conflict';
+    cinema.gimbalSource = measured ? 'yolo' : 'uwb';
+    const base = measured ? computeGimbalTrackDesiredRate(now) : computeGimbalBeaconDesiredRate(now);
+    return composeCinemaGimbalRate({now,base,execution:cinema.execution,feedback:gimbalState.feedback,
+      axis:GIMBAL_AXIS,beacon:GIMBAL_BEACON_CONFIG,limits:{yawMinDeg:GIMBAL_YAW_MIN_DEG,yawMaxDeg:GIMBAL_YAW_MAX_DEG,
+        pitchMinDeg:GIMBAL_PITCH_MIN_DEG,pitchMaxDeg:GIMBAL_PITCH_MAX_DEG}});
+  }
   return gimbalState.trackMode === 'beacon'
     ? computeGimbalBeaconDesiredRate(now)
     : computeGimbalTrackDesiredRate(now);
@@ -2192,7 +2270,12 @@ function startGimbalLoop() {
     } else if (gimbalState.trackingActive) {
       gimbalHoldUntil = 0;
       const rawDesired = computeActiveGimbalDesiredRate(now);
-      if (rawDesired.absoluteAngle) {
+      if (cinema.active && (rawDesired.stale || rawDesired.dryRun)) {
+        resetGimbalTrackMotionState();
+        gimbalLastRateX = 0;
+        gimbalLastRateY = 0;
+        gimbalLastFrame = buildGimbalFrame({joystickCommand:0x70,joystickX:0,joystickY:0});
+      } else if (rawDesired.absoluteAngle) {
         gimbalTrackDesiredRateX = rawDesired.x;
         gimbalTrackDesiredRateY = rawDesired.y;
         gimbalLastRateX = rawDesired.x;
@@ -2211,8 +2294,9 @@ function startGimbalLoop() {
         const dt = GIMBAL_COMMAND_INTERVAL_MS / 1000;
         const nextX = advanceGimbalTrackAxis(gimbalLastRateX, gimbalTrackRateAccelX, gimbalTrackDesiredRateX, dt);
         const nextY = advanceGimbalTrackAxis(gimbalLastRateY, gimbalTrackRateAccelY, gimbalTrackDesiredRateY, dt);
-        gimbalLastRateX = nextX.rate;
-        gimbalLastRateY = nextY.rate;
+        const limited = cinema.active ? limitGimbalTrackRates(nextX.rate,nextY.rate) : {x:nextX.rate,y:nextY.rate};
+        gimbalLastRateX = limited.x;
+        gimbalLastRateY = limited.y;
         gimbalTrackRateAccelX = nextX.accel;
         gimbalTrackRateAccelY = nextY.accel;
         gimbalLastFrame = buildGimbalFrame({
@@ -3099,7 +3183,7 @@ function startGimbalTracking(options = {}) {
   if (requestedMode === 'swimmer') {
     const swimmer = gimbalConfig.swimmer || {};
     detector = String(swimmer.swimmer_detector || swimmer.detector || 'swimmer').trim().toLowerCase();
-    source = String(swimmer.source || sharedSource);
+    source = options.cinema ? sharedSource : String(swimmer.source || sharedSource);
     script = path.join(PROJECT_ROOT, 'scripts', 'infer_video.py');
     if (!fs.existsSync(script)) return { ok: false, error: 'infer_video swimmer tracker script not found' };
     const swimmerLoopHz = Math.max(1, Number(swimmer.loop_hz ?? 10) || 10);
@@ -3168,6 +3252,7 @@ function startGimbalTracking(options = {}) {
       args.push('--tracker', String(face.tracker));
     }
   }
+  if (requestedMode === 'swimmer' && options.cinema) args.push('--single-target-output');
   try {
     const trackerThreadLimitText = String(trackerThreadLimit);
     const workerEpoch = randomUUID();
@@ -3219,6 +3304,8 @@ function startGimbalTracking(options = {}) {
         if (line.startsWith('FRAME_RESULT:')) {
           try {
             const result = JSON.parse(line.slice(13));
+            if (options.cinema && child === gimbalTrackProcess && result.worker_epoch === workerEpoch
+                && result.mode_generation === experimentTrackGeneration) cinema.vision(result);
             if (result.worker_epoch === workerEpoch) experimentLive?.visionResult(result, {
               frame_id: result.frame_id || null, stream_epoch: result.stream_epoch || null,
               obs_ns: result.obs_ns || null, time_kind: result.time_kind || 'unknown',
@@ -3264,7 +3351,10 @@ function startGimbalTracking(options = {}) {
             const message = { ...target, mode: requestedMode, commandDx: sent.x, commandDy: sent.y, predictedDx: sent.predictedX, predictedDy: sent.predictedY, targetSpeed: sent.targetSpeed, rawVx: sent.rawVx, rawVy: sent.rawVy, filteredVx: sent.filteredVx, filteredVy: sent.filteredVy, leadMs: sent.leadMs, detectorAgeMs: sent.detectorAgeMs, angleGain: sent.angleGain, rateX: sent.rateX, rateY: sent.rateY, desiredRateX: sent.desiredRateX ?? sent.rateX, desiredRateY: sent.desiredRateY ?? sent.rateY, holdMs: sent.holdMs || 0, axis: sent.axis || '', pulse: Boolean(sent.pulse), smooth: Boolean(sent.smooth), gated: Boolean(sent.gated), limited: Boolean(sent.limited), locked: true, message: target.message || lockedLabel, workerActive: true, timestamp: Date.now() };
             gimbalState.lastTarget = message;
             if (requestedMode === 'swimmer') {
-              swimmerVisionSample = captureSwimmerVisionSample(message, gimbalState.feedback, {
+              const sampleAgeMs = Number(process.hrtime.bigint())/1e6 - Number(target.obs_ns)/1e6;
+              const observation = options.cinema ? {...message,timestamp: Number.isFinite(sampleAgeMs) && sampleAgeMs >= 0
+                ? Date.now()-sampleAgeMs : null} : message;
+              swimmerVisionSample = captureSwimmerVisionSample(observation, gimbalState.feedback, {
                 protocol: GIMBAL_PROTOCOL, connected: gimbalState.connected
               });
             }
@@ -3286,10 +3376,18 @@ function startGimbalTracking(options = {}) {
         }
       }
     });
+    child.on('error', error => {
+      addLog('GIMBAL_TRACK_ERR', error.message);
+      if (options.cinema && child === gimbalTrackProcess && cinema.active) cinema.stop('泳者检测器启动失败');
+    });
     child.stderr.on('data', (data) => addLog('GIMBAL_TRACK_ERR', String(data).trimEnd()));
     child.on('exit', (code, signalName) => {
       addLog('GIMBAL_TRACK', `Tracker exited code=${code} signal=${signalName || ''}`);
       if (child !== gimbalTrackProcess) return;
+      if (options.cinema && cinema.active && !gimbalTrackStopRequested) {
+        cinema.stop('泳者检测器已退出');
+        return;
+      }
       if (!gimbalTrackStopRequested && gimbalState.trackingActive) {
         experimentLive?.visionWorker('failed', { ...worker, mode_generation: experimentTrackGeneration });
       }
@@ -3705,6 +3803,7 @@ function pwmToSignedRange(pwm, minimum, maximum) {
 }
 
 function handleMotorControl(channel, pwm, sourceLabel = 'UNKNOWN') {
+  if (cinema.active) return {ok:false,error:'请先停止自主运镜'};
   const validation = validateChannelAndPwm(channel, pwm);
   if (!validation.ok) {
     return validation;
@@ -3784,6 +3883,7 @@ function sendManualRoverOutput(controlInput = {}, sourceLabel = manualRoverSourc
     throttle: normalized.throttle,
     steering: normalized.steering,
     protocol: ROVER_CONTROL_PROTOCOL,
+    ...(sourceLabel === 'PPO' ? {reason:'cinematography'} : {}),
     motorTargetSemantics: true
   });
 
@@ -3805,6 +3905,7 @@ function sendManualRoverOutput(controlInput = {}, sourceLabel = manualRoverSourc
 }
 
 function applyRoverControl(controlInput = {}, sourceLabel = 'WEB') {
+  if (cinema.active) return {ok:false,error:'请先停止自主运镜'};
   for (const axis of ['throttle', 'steering']) {
     const value = controlInput?.[axis];
     if (value !== undefined && (typeof value !== 'number' || !Number.isFinite(value))) {
@@ -4955,8 +5056,8 @@ function updateUwbPathTelemetry() {
   emitDashboardState('uwb_path_update',path);
 }
 const uwbPathTimer=setInterval(updateUwbPathTelemetry,100);
-const uwbFollowTimer = setInterval(updateUwbFollow, Math.round(1000 / UWB_FOLLOW_RATE_HZ));
-const manualRoverSlewTimer = setInterval(updateManualRoverSlew, Math.round(1000 / ROVER_MANUAL_SLEW_RATE_HZ));
+const uwbFollowTimer = setInterval(() => { if (!cinema.active) updateUwbFollow(); }, Math.round(1000 / UWB_FOLLOW_RATE_HZ));
+const manualRoverSlewTimer = setInterval(() => { if (!cinema.active) updateManualRoverSlew(); }, Math.round(1000 / ROVER_MANUAL_SLEW_RATE_HZ));
 manualRoverSlewTimer.unref();
 if (GIMBAL_AUTO_CONNECT) {
   startGimbalLoop();
@@ -5999,6 +6100,7 @@ let boardPowerOffPending = false;
 app.post('/api/system/shutdown', async (_req, res) => {
   if (boardPowerOffPending) return res.status(409).json({ success: false, message: 'Board shutdown is already pending' });
   boardPowerOffPending = true;
+  cinema.stop('board_shutdown');
   try {
     await prepareBoardShutdown({
       stopFollow: () => { stopUwbFollow('board_shutdown', { disarm: true }); forceNeutralRoverControl('BOARD_SHUTDOWN', 'board_shutdown'); disarmAndReturnManual('board_shutdown'); },
@@ -6026,6 +6128,7 @@ app.post('/api/emergency/stop', (req, res) => {
   const requestedAt = Date.now();
   addLog('CRITICAL', 'Emergency stop triggered');
   uwbVisionService.stop();
+  cinema.stop('emergency_stop');
   stopUwbFollow('emergency_stop');
 
   for (let channel = 1; channel <= 8; channel += 1) {
@@ -6132,6 +6235,7 @@ io.on('connection', (socket) => {
 
   socket.on('disarm', () => {
     if (!controlAccess.authorizeSocket(socket, false)) return;
+    cinema.stop('operator_disarm');
     stopUwbFollow('operator_disarm');
     controlAccess.clearDisconnectedOwner('operator_disarm');
     if (!systemState.telemetry.armed) {
@@ -6204,6 +6308,7 @@ Press Ctrl+C to stop
   cleanupStaleGimbalTrackWorkers('server-start');
   if (GIMBAL_FACE_KEEP_WARM && GIMBAL_FACE_TRACK.enabled !== false) {
     const warmTimer = setTimeout(() => {
+      if (cinema.active || gimbalState.trackingActive) return;
       const result = startGimbalTracking({ mode: 'face', warmOnly: true });
       if (!result.ok) addLog('GIMBAL_TRACK_ERR', `Face tracker prewarm failed: ${result.error}`);
     }, 750);
@@ -6237,6 +6342,7 @@ let shutdownStarted = false;
 function shutdown() {
   if (shutdownStarted) return;
   shutdownStarted = true;
+  cinema.stop('server_shutdown');
   const forceExitTimer = setTimeout(() => {
     console.error('[Shutdown] Force exit after timeout');
     process.exit(0);

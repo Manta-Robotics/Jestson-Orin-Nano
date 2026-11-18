@@ -30,7 +30,7 @@ Web 的实验记录按钮与 `bash scripts/experiment_logger/run.sh` 使用同�
 
 ## 自主运镜接口
 
-模块视图中预留「自主运镜」。配对后通过 `GET /api/cinematography/state` 读取可用状态、模式列表和可执行操作。当前集成状态为「未接入」。接入板端策略时，给 `installCinematographyApi(app, provider)` 提供 `state()`、`start({mode})`、`stop()`。状态结构为 `{schema_version,available,state,mode,reason,modes,can_start,can_stop}`，模式列表由策略提供。状态取策略端反馈。写操作沿用控制权检查，对应 `POST /api/cinematography/start` 和 `POST /api/cinematography/stop`，未接入时返回 409。现有跟随和云台仍由各自入口操作。
+「自主运镜」已接入板端 PPO。配对后可用 `GET /api/cinematography/state` 查看可用状态、启动阻挡原因、视觉模式、目标状态、距离和执行意图。控制端可调用 `POST /api/cinematography/start`、`/stop`，或向 `/api/cinematography/vision` 提交 `{"p_enabled":false}` 切换泳者视觉。策略原始决策和执行结果写入实验事件表。录像沿用已有接口。[板端运镜操作与模型说明](ONBOARD_CINEMATOGRAPHY_ZH.md)
 
 ## 本地验证
 

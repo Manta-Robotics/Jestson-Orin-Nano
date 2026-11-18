@@ -526,7 +526,7 @@ body[data-theme="light"] .media-rate-select option{color:#173040;background:#f8f
 #relativeRadarDialog .relative-position-plot{aspect-ratio:auto;height:100%;min-height:160px}
 
 </style>
-<link rel="stylesheet" href="css/experiment-console.css?v=2">
+<link rel="stylesheet" href="css/experiment-console.css?v=3">
 <link rel="stylesheet" href="css/uwb-vision.css?v=20261118-follow">
 </head>
 <body data-theme="dark" data-language="zh">
@@ -551,7 +551,7 @@ body[data-theme="light"] .media-rate-select option{color:#173040;background:#f8f
       <svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m8 15 3-3 2 2 3-4 3 5M8 9h.01"/></svg><span>录像</span>
       <span id="mediaBadge" hidden style="font-size:9px;background:var(--red);color:#fff;padding:1px 5px;border-radius:8px;margin-left:4px">1</span>
     </button>
-    <button class="nav-tab" type="button" data-cinematography-open aria-haspopup="dialog">自主运镜</button>
+    <button class="nav-tab" type="button" data-nav="cinematography" aria-controls="cinematographyPanel">自主运镜</button>
   </nav>
   <div class="status-bar">
     <div class="status-item"><div class="status-dot" id="connDot"></div><span>连接</span><strong id="connectionMetric">未连接</strong></div>
@@ -663,7 +663,7 @@ body[data-theme="light"] .media-rate-select option{color:#173040;background:#f8f
               <div class="gimbal-actions">
                 <button class="gimbal-action-btn" type="button" data-gimbal-action="home" title="云台回中"><svg viewBox="0 0 24 24"><path d="m4 11 8-7 8 7v9h-6v-6h-4v6H4z"/></svg></button>
                 <button class="gimbal-action-btn" type="button" data-gimbal-action="stop" title="停止云台"><svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1"/></svg></button>
-                <button class="gimbal-action-btn record-btn" id="recordButton" type="button" data-gimbal-action="record" title="录像"><i></i></button>
+                <button class="gimbal-action-btn record-btn" id="recordButton" type="button" data-gimbal-action="record" title="录像"><i></i><span class="cinema-record-label" aria-hidden="true">录像</span></button>
                 <button class="gimbal-action-btn osd-btn active" id="gimbalOsd" type="button" aria-pressed="true" title="OSD">OSD</button>
                 <button class="gimbal-action-btn refresh-stream-btn" type="button" id="refreshGimbalVideo" title="只刷新云台画面" aria-label="只刷新云台画面"><svg viewBox="0 0 24 24"><path d="M20 6v5h-5"/><path d="M4 18v-5h5"/><path d="M18.5 9a7 7 0 0 0-11.8-2.4L4 9"/><path d="M5.5 15a7 7 0 0 0 11.8 2.4L20 15"/></svg><span>刷新</span></button>
                 <button class="gimbal-action-btn beacon-calibration-btn" type="button" id="gimbalBeaconCalibration" title="UWB与云台多点校准" hidden>多点校准</button>
@@ -671,6 +671,7 @@ body[data-theme="light"] .media-rate-select option{color:#173040;background:#f8f
             </div>
           </div>
         </div>
+        <section id="cinematographyPanel" class="quad" aria-labelledby="cinematographyTitle" hidden></section>
         <div class="quad quad-drive" data-area="drive">
           <div class="quad-header">
             <div class="quad-header-left"><b id="driveSectionTitle">移动控制</b><small id="driveModeLabel">双桨推进</small></div>
@@ -1705,7 +1706,7 @@ function handleGimbalVideoClick(event){
     refreshGimbalVideoStream();
     return;
   }
-  if(globalThis.MantaFollowFusion?.usesGimbal()||state.gimbalMode!=="click"||!gimbalControlAvailable())return;
+  if(state.workspace==="cinematography"||globalThis.MantaFollowFusion?.usesGimbal()||state.gimbalMode!=="click"||!gimbalControlAvailable())return;
   var map=gimbalVideoMapping(),rect=$(".video-feed").getBoundingClientRect(),px=event.clientX-rect.left,py=event.clientY-rect.top,videoX=(px-map.offsetX)/map.scale,videoY=(py-map.offsetY)/map.scale;
   if(videoX<0||videoX>map.sourceWidth||videoY<0||videoY>map.sourceHeight)return;state.clickMarker={x:videoX/map.sourceWidth,y:videoY/map.sourceHeight};drawGimbalOverlay();
   var dx=Math.round((videoX/map.sourceWidth-0.5)*(state.gimbalControlWidth||1920)),dy=Math.round((videoY/map.sourceHeight-0.5)*(state.gimbalControlHeight||1080)),activeTransport=ensureTransport();
@@ -2010,9 +2011,15 @@ function signedPercent(v){return(v>0?"+":"")+v+"%"}
 function showView(view, refreshRecordings=true){
   if(state.downloading){showToast("下载完成前无法切换页面");return;}
   if(!state.connected&&view!=="device"){showToast("请先连接 Manta","Connect to Manta first");view="device";}
-  state.view=view;
+  var cinema=view==="cinematography", wasCinema=state.workspace==="cinematography";
+  var nextView=cinema?"device":view;
+  var keepCamera=state.view==="device"&&nextView==="device"&&wasCinema!==cinema;
+  if(cinema&&!wasCinema&&(state.vector.x||state.vector.y))window.resetMantaJoystick?.();
+  state.view=nextView;
+  shell.dataset.workspace=state.workspace=view;
+  $("#cinematographyPanel").hidden=!cinema;
   $$(".view").forEach(function(n){
-    var active=n.dataset.view===view;
+    var active=n.dataset.view===state.view;
     n.hidden=!active;
     requestAnimationFrame(function(){n.classList.toggle("active",active)});
   });
@@ -2021,7 +2028,8 @@ function showView(view, refreshRecordings=true){
   if(view!=="media")pauseMediaPreview();
   if(view==="media"&&state.transportMode==="live"&&refreshRecordings)loadLiveRecordings();
   if(view==="map"){initializeOfflineMap();renderGpsStatus();setTimeout(function(){if(offlineMap)offlineMap.resize()},50);}
-  syncVideoSource();
+  if(!keepCamera)syncVideoSource();
+  if(wasCinema!==cinema)document.dispatchEvent(new CustomEvent("manta:cinematography-view",{detail:cinema}));
 }
 
 function syncVideoSource(){
@@ -2246,7 +2254,7 @@ function startMockTelemetry(){
 function installJoystick(){
   var root=$("#joystick"),stick=$("#joyStick");
   var activePointer=null,origin=null;
-  function enabled(){return state.connected&&state.controlLink&&state.armed&&!state.calibrating&&!state.driveModeSwitching&&!state.emergency&&!state.disarmPending&&state.driveMode!=="auto";}
+  function enabled(){return state.workspace!=="cinematography"&&state.connected&&state.controlLink&&state.armed&&!state.calibrating&&!state.driveModeSwitching&&!state.emergency&&!state.disarmPending&&state.driveMode!=="auto";}
   function preventGesture(e){if(e.cancelable)e.preventDefault();}
   function update(cx,cy){
     if(!enabled()){reset();return;}
@@ -2596,6 +2604,7 @@ function applyRecordingState(payload){
   $("#recordButton").dataset.recordingPhase=state.recordingPhase;
   var labels={starting:localize("正在启动录像，点击停止","Starting; click to stop"),recovering:localize("视频中断，正在自动恢复；点击停止","Reconnecting video; click to stop"),stopping:localize("正在保存录像","Saving recording")};
   $("#recordButton").title=labels[payload.phase]||(state.recordingAny?localize("停止录像","Stop recording"):localize("开始录像","Start recording"));
+  $(".cinema-record-label").textContent=state.recordingAny?localize("停止录像","Stop recording"):localize("录像","Record");
   if(state.recordingAny||payload.phase==="stopping"){recordTimerHandle=setInterval(renderRecordTimer,500);renderRecordTimer()}
   var recordingError=payload.error||(state.recordingCamera.enabled&&state.recordingCamera.error?localize("TF卡录像异常：","TF recording error: ")+state.recordingCamera.error:null);
   if(recordingError&&recordingError!==recordingLastError)showToast(recordingError);
@@ -3143,6 +3152,6 @@ installEvents();installJoystick();installArmControl();seedLogs();renderTransport
 </script>
 <script type="module" src="js/uwb-vision-panel.js?v=20261118-follow"></script>
 <script type="module" src="js/experiment-panel.js?v=2"></script>
-<script type="module" src="js/cinematography-panel.js?v=1"></script>
+<script type="module" src="js/cinematography-panel.js?v=2"></script>
 </body>
 </html>

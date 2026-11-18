@@ -28,15 +28,22 @@ export function installCinematographyApi(app, provider = null) {
       fail(res, 503, 'CINEMATOGRAPHY_OFFLINE', '自主运镜状态暂时不可用');
     }
   });
-  for (const action of ['start', 'stop']) {
+  for (const action of ['start', 'stop', 'vision']) {
     app.post(prefix + '/' + action, async (req, res) => {
       if (changing) return fail(res, 409, 'CINEMATOGRAPHY_BUSY', '该模块正在切换状态');
       changing = true;
       try {
         const before = await state();
         if (!before.available) return fail(res, 409, 'CINEMATOGRAPHY_UNAVAILABLE', before.reason);
+        if (action === 'vision') {
+          if (typeof req.body?.p_enabled !== 'boolean')
+            return fail(res, 400, 'INVALID_ARGUMENT', 'p_enabled 必须为布尔值');
+          if (!before.can_set_p) return fail(res, 409, 'CINEMATOGRAPHY_STATE', '请等待运镜切换完成');
+          await provider.setVision(req.body.p_enabled);
+          return res.json({ success: true, data: await state() });
+        }
         if (!before['can_' + action])
-          return fail(res, 409, 'CINEMATOGRAPHY_STATE', '当前状态无法执行该操作');
+          return fail(res, 409, 'CINEMATOGRAPHY_STATE', before.reason || '当前状态无法执行该操作');
         if (action === 'start') {
           const mode = req.body?.mode;
           if (mode != null && !before.modes.includes(mode))
@@ -44,8 +51,8 @@ export function installCinematographyApi(app, provider = null) {
           await provider.start({ mode: mode ?? null });
         } else await provider.stop();
         res.json({ success: true, data: await state() });
-      } catch {
-        fail(res, 503, 'CINEMATOGRAPHY_OFFLINE', '自主运镜模块未能完成操作');
+      } catch (error) {
+        fail(res, 503, 'CINEMATOGRAPHY_OFFLINE', error.message || '自主运镜模块未能完成操作');
       } finally {
         changing = false;
       }
