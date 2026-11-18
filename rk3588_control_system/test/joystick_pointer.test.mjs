@@ -95,3 +95,9 @@ test('actual live transport maps right/left/up/down to the intended command sign
   }
   assert.deepEqual(sent.map(p => [p.throttle || 0, p.steering || 0]), [[0, 45], [0, -45], [100, 0], [-100, 0]]);
 });
+
+test('cinematography view cannot issue manual joystick commands', () => {
+  const t = setup(); t.scope.state.workspace = 'cinematography';
+  t.handlers.pointerdown(t.event(1, 180, 110)); t.handlers.pointermove(t.event(1, 180, 80));
+  assert.equal(t.commands.length, 0);
+});

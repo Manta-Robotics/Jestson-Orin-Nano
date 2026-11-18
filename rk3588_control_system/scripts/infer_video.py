@@ -744,10 +744,16 @@ def run(args: argparse.Namespace) -> None:
 
         targets = normalized_targets(xyxy, confs, ids if measured_ids else [None] * len(xyxy), frame)
         detection_state = 'predicted' if status == 'coast' else 'detected' if targets else 'no_target'
-        if detection_state == 'detected' and frame_meta:
-            last_measured_frame_id = frame_meta['frame_id']
         selected_id = str(locked_id) if measured_ids and locked_id is not None else None
         selected_index = 0 if len(targets) == 1 and locked_box is not None and detection_state == 'detected' else None
+        if getattr(args, "single_target_output", False):
+            chosen = locked_box is not None and detection_state == 'detected'
+            targets = normalized_targets([locked_box], [locked_conf], [selected_id], frame) if chosen else []
+            selected_index = 0 if targets else None
+            if not targets and detection_state == 'detected':
+                detection_state = 'no_target'
+        if detection_state == 'detected' and frame_meta:
+            last_measured_frame_id = frame_meta['frame_id']
         emit_frame_result(frame_meta, detection_state, 'swimmer', targets, selected_id, last_measured_frame_id,
                           selected_index=selected_index)
 
@@ -774,6 +780,8 @@ def run(args: argparse.Namespace) -> None:
                 "detections": int(len(ids)),
                 "locked": True,
                 "message": "SWIMMER LOCKED",
+                "frame_id": (frame_meta or {}).get("frame_id"),
+                "obs_ns": (frame_meta or {}).get("obs_ns"),
                 "detector": "yolo_swimmer",
                 "tracker": "bytetrack+target_filter",
                 "flow_quality": float(max(0.2, min(1.0, 0.55 + 0.45 * (1.0 - target_filter.urgency)))),
@@ -799,6 +807,7 @@ def run(args: argparse.Namespace) -> None:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Swimmer coordinate worker for gimbal tracking")
+    p.add_argument("--single-target-output", action="store_true", help="Publish only the selected swimmer in per-frame observations")
     p.add_argument("--source", default=DEFAULT_SOURCE)
     p.add_argument("--weights", default=str(DEFAULT_WEIGHTS))
     p.add_argument("--tracker", default=str(DEFAULT_TRACKER))

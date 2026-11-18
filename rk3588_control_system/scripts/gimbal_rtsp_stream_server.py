@@ -11,11 +11,11 @@ from email.utils import formatdate
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from socketserver import ThreadingMixIn
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 import cv2
 import numpy as np
-from media_alignment import FrameClock, frame_headers
+from media_alignment import FRAME_HEADERS, FrameClock, frame_headers
 
 try:
     import av
@@ -263,6 +263,29 @@ class GimbalStreamHandler(BaseHTTPRequestHandler):
                 status = {'ok': True, 'inputUrl': INPUT_URL, 'inputType': 'rtsp', 'lastError': FRAME_CACHE['error'],
                           'ready': bool(FRAME_CACHE['bytes']), 'shared_frame_alignment': ALIGNMENT_ENABLED}
             self._send_json(status)
+            return
+
+        if path == '/_cinema-frame.jpg':
+            if self.client_address[0] not in ('127.0.0.1', '::1') or not ALIGNMENT_ENABLED:
+                self.send_error(404)
+                return
+            wanted = parse_qs(urlsplit(self.path).query).get('id', [None])[0]
+            with FRAME_LOCK:
+                match = next(((payload, meta) for _, payload, meta in reversed(FRAME_HISTORY)
+                              if wanted is None or meta['frame_id'] == wanted), None)
+            if not match:
+                self.send_error(404)
+                return
+            payload, meta = match
+            self.send_response(200)
+            self.send_header('Content-Type', 'image/jpeg')
+            self.send_header('Content-Length', str(len(payload)))
+            self.send_header('Cache-Control', 'no-store')
+            for key, header in FRAME_HEADERS.items():
+                if meta.get(key) is not None:
+                    self.send_header(header, str(meta[key]))
+            self.end_headers()
+            self.wfile.write(payload)
             return
 
         if path in ('/_record.mjpg', '/_frame-events'):

@@ -1,0 +1,10 @@
+{
+  "schema": "manta.onboard.cinema.actor.v1",
+  "checkpointSha256": "ccdfe13a88600ce6201c7a65726917bb1e9b2442809bd32b5b5869b61dd073f7",
+  "policyVersion": "hybrid_qppo_u57_2e99ac8e9491",
+  "update": 57,
+  "actorSha256": "422dbfae876d41992e4a35dc6d5a95d6234666fd92c3d04ea4d70e21436d08cf",
+  "torchExportVersion": "2.5.1+cu118",
+  "observation": "RGB, RGB Sobel edge, single-swimmer YOLO box score map",
+  "visionOff": "RGB, RGB Sobel edge, zero person map"
+}

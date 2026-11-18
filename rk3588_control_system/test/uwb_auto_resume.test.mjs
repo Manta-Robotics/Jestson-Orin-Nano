@@ -117,10 +117,11 @@ test('operator stop while waiting cancels automatic rearming even when good UWB 
 });
 test('explicit disarm while already disarmed still revokes a pending automatic resume',()=>{
  const {box,context}=server();box.uwbAutoResume.stopped('prediction_wait_timeout');box.systemState.telemetry.armed=false;
+ let cinemaStop;box.cinema={stop:reason=>{cinemaStop=reason;}};
  let disarm;box.socket={on:(_name,fn)=>disarm=fn,emit:()=>{}};
  box.controlAccess={authorizeSocket:()=>true,clearDisconnectedOwner:()=>{}}; // Paired observer; authorization is exercised in control_access_server.test.mjs.
  const handler=source.slice(source.indexOf("socket.on('disarm'"),source.indexOf("socket.on('request_telemetry'"));
- vm.runInContext(handler,context);disarm();assert.equal(box.uwbAutoResume.pending,false);
+ vm.runInContext(handler,context);disarm();assert.equal(cinemaStop,'operator_disarm');assert.equal(box.uwbAutoResume.pending,false);
 });
 test('operator stop during an automatic mode transition cancels the in-flight arm sequence',async()=>{
  const {box,context,commands,step}=server();

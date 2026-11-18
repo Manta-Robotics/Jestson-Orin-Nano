@@ -204,7 +204,7 @@ dialog.innerHTML = `
       <div class="experiment-tools">
         <label>模块视图 <select id="experimentControlModule"></select></label>
         <div class="experiment-tools" id="experimentControlLinks"></div>
-        <button class="experiment-secondary" type="button" data-cinematography-open aria-haspopup="dialog">自主运镜</button>
+        <button class="experiment-secondary" type="button" data-cinematography-open aria-controls="cinematographyPanel">自主运镜</button>
       </div>
       <p id="experimentSelectedModule" class="experiment-status"></p>
     </section>

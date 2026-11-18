@@ -139,5 +139,65 @@ body[data-theme="light"] .experiment-summary strong[data-state="error"] { color:
   .experiment-event button { grid-column: 2; justify-self: start; }
 }
 
-.cinematography-dialog { width: min(540px, calc(100vw - 20px)); }
-.cinematography-dialog [hidden] { display: none !important; }
+/* The camera and its recording controls stay mounted across both workspaces. */
+.cinema-record-label { display: none; }
+[data-workspace="cinematography"] #quadrantGrid {
+  grid-template-columns: minmax(0, 2fr) minmax(275px, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+}
+[data-workspace="cinematography"] #quadrantGrid .quad-video { grid-column: 1; grid-row: 1; }
+[data-workspace="cinematography"] :is(.quad-imu, .quad-drive, .quad-logs, .control-mode, #layoutToggle,
+  .gimbal-modes, .video-specs, #gimbalOverlay, #trackingReticle, .fusion-camera-label,
+  [data-gimbal-action="home"], [data-gimbal-action="stop"], #gimbalBeaconCalibration) { display: none !important; }
+[data-workspace="cinematography"] .video-feed { cursor: default; }
+[data-workspace="cinematography"] .video-feed :is(video, #liveGimbalFeed) { object-fit: contain; }
+[data-workspace="cinematography"] .video-toolbar { justify-content: flex-end; }
+[data-workspace="cinematography"] #recordButton { width: auto; padding-inline: 12px; gap: 7px; }
+[data-workspace="cinematography"] .cinema-record-label { display: inline; font: 600 12px var(--ff); }
+#cinematographyPanel { grid-column: 2; grid-row: 1; overflow: auto; color: var(--t1); }
+.cinema-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 18px 20px; border-bottom: 1px solid var(--border); }
+.cinema-heading h2 { margin: 0; font-size: 20px; }
+.cinema-heading h2:focus { outline: none; }
+#cinematographyStatus { color: var(--t2); font-size: 12px; }
+#cinematographyStatus[data-state="running"] { color: var(--green); }
+.cinema-controls { padding: 2px 20px 16px; }
+.cinema-vision { min-height: 60px; display: flex; align-items: center; justify-content: space-between; gap: 14px; cursor: pointer; }
+.cinema-vision span { display: grid; gap: 3px; }
+.cinema-vision strong { font-size: 15px; }
+.cinema-vision small, .cinema-readings dt, .cinema-commands .experiment-status { color: var(--t2); font-size: 13px; }
+.cinema-vision input {
+  appearance: none; position: relative; flex-shrink: 0; width: 44px; height: 26px; margin: 0;
+  border-radius: 20px; border: 1px solid var(--t3); background: var(--bg2); cursor: pointer;
+}
+.cinema-vision input::before {
+  content: ""; position: absolute; width: 18px; height: 18px; left: 3px; top: 3px;
+  background: var(--t2); border-radius: 50%;
+}
+.cinema-vision input:checked { background: var(--ice); border-color: var(--ice); }
+.cinema-vision input:checked::before { transform: translateX(18px); background: var(--bg); }
+.cinema-vision input:disabled { opacity: .62; cursor: default; }
+#cinematographyPanel :is(input, button, select):focus-visible { outline: 2px solid var(--ice); outline-offset: 3px; }
+.cinema-readings { margin: 0; padding: 5px 0; border-block: 1px solid var(--border); }
+.cinema-readings div { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 7px 0; }
+.cinema-readings dt { white-space: nowrap; }
+.cinema-readings dd { text-align: end; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; font-size: 15px; font-weight: 600; }
+.cinema-commands { padding: 16px 0; }
+.cinema-commands label { display: block; margin-bottom: 8px; }
+.cinema-actions, .cinema-device { display: flex; flex-wrap: wrap; gap: 8px; }
+.cinema-actions button { flex: 1; min-height: 44px; }
+.cinema-actions [data-cinema-action="start"]:enabled { background: var(--ice); color: var(--bg); border-color: var(--ice); }
+.cinema-actions [data-cinema-action="stop"]:enabled { border-color: var(--red); }
+.cinema-device { border-top: 1px solid var(--border); padding-top: 10px; }
+.cinema-device [data-cinema-disarm] { margin-inline-start: auto; }
+@media (max-height: 540px) {
+  [data-workspace="cinematography"] #quadrantGrid { grid-template-columns: minmax(0, 1.6fr) minmax(240px, 1fr); }
+  .cinema-heading { padding: 8px 12px; }
+  .cinema-heading h2 { font-size: 16px; }
+  .cinema-controls { padding: 0 12px 8px; }
+  .cinema-vision { min-height: 46px; }
+  .cinema-readings div { padding: 3px 0; }
+  .cinema-commands, .cinema-device { padding-block: 6px; }
+}
+@media (pointer: coarse) {
+  #cinematographyPanel button, [data-workspace="cinematography"] .gimbal-actions button { min-height: 44px; }
+}
