@@ -193,22 +193,32 @@
     };
 
     MockTransport.prototype.startUwbFollow = function () {
-        var state = { active: true, status: "tracking", reason: "tracking", desiredSpeedMps: 0.6, speedLimitMps: 0.8 };
+        var state = { active: true, status: "tracking", reason: "tracking", followMode: this.followMode || "rear", sideDistanceM: this.sideDistanceM || 2, trackingMethod: this.trackingMethod || "traditional", desiredSpeedMps: 0.6, speedLimitMps: 0.8 };
         this.emit("uwbFollow", state);
         return Promise.resolve({ success: true, state: state });
     };
 
     MockTransport.prototype.stopUwbFollow = function () {
-        var state = { active: false, status: "stopped", reason: "manual_stop", desiredSpeedMps: 0 };
+        var state = { active: false, status: "stopped", reason: "manual_stop", followMode: this.followMode || "rear", sideDistanceM: this.sideDistanceM || 2, trackingMethod: this.trackingMethod || "traditional", desiredSpeedMps: 0 };
         this.emit("uwbFollow", state);
         return Promise.resolve({ success: true, state: state });
     };
 
     MockTransport.prototype.setUwbFollowMethod = function (method) {
         var selected = method === "neural" ? "neural" : "traditional";
-        var state = { active: false, status: "stopped", reason: "method_selected", trackingMethod: selected, desiredSpeedMps: 0 };
+        this.trackingMethod = selected;
+        var state = { active: false, status: "stopped", reason: "method_selected", trackingMethod: selected, followMode: this.followMode || "rear", sideDistanceM: this.sideDistanceM || 2, desiredSpeedMps: 0 };
         this.emit("uwbFollow", state);
         return Promise.resolve({ success: true, trackingMethod: selected, state: state });
+    };
+
+    MockTransport.prototype.setUwbFollowMode = function (mode, distanceM) {
+        this.followMode = mode; this.sideDistanceM = distanceM;
+        if (mode !== "rear") this.trackingMethod = "traditional";
+        var state = { active: false, status: "stopped", reason: "mode_selected", followMode: mode,
+            sideDistanceM: distanceM, trackingMethod: this.trackingMethod || "traditional", desiredSpeedMps: 0 };
+        this.emit("uwbFollow", state);
+        return Promise.resolve({ success: true, followMode: mode, state: state });
     };
 
     MockTransport.prototype.arm = function () {
@@ -719,6 +729,13 @@
         }.bind(this));
     };
 
+    LiveTransport.prototype.setUwbFollowMode = function (mode, distanceM) {
+        return postJson("/api/uwb-follow/mode", { mode: mode, distanceM: distanceM }).then(function (result) {
+            if (result && result.state) this.emit("uwbFollow", result.state);
+            return result;
+        }.bind(this));
+    };
+
     function armingFailureMessage(result) {
         var reason = String(result.reason || "").trim();
         var explanations = {
@@ -738,7 +755,6 @@
         if (!this.socket || !this.socket.connected) return Promise.reject(new Error("实时控制链路未连接，拒绝武装"));
         if (this.armingPromise) return this.armingPromise;
         var socket = this.socket;
-        var armSocket = this.socket;
         var requestId = "arm-" + Date.now() + "-" + Math.random().toString(36).slice(2);
         this.armingPromise = new Promise(function (resolve, reject) {
             var settled = false, failureTimer = null;
@@ -760,7 +776,7 @@
                 settled = true;
                 clearTimeout(timer);
                 clearTimeout(failureTimer);
-                armSocket.off("arm_result", onResult);
+                socket.off("arm_result", onResult);
                 socket.off("aircraft_armed", onArmed);
                 socket.off("error_message", onError);
                 socket.off("disconnect", onDisconnect);
@@ -776,8 +792,8 @@
             socket.on("aircraft_armed", onArmed);
             socket.on("error_message", onError);
             socket.on("disconnect", onDisconnect);
-            armSocket.on("arm_result", onResult);
-            this.socket.emit("arm", { requestId: requestId });
+            socket.on("arm_result", onResult);
+            socket.emit("arm", { requestId: requestId });
         }.bind(this)).finally(function () { this.armingPromise = null; }.bind(this));
         return this.armingPromise;
     };
@@ -788,7 +804,7 @@
             var sendStop = function () {
                 return postJson("/api/gimbal/stop", {}).then(function (result) {
                     this.applyGimbalTrackingState(result && result.state);
-                    if (result && result.state) this.emit(action === "recordStart" || action === "recordStop" ? "recordingState" : "gimbalState", result.state);
+                    if (result && result.state) this.emit("gimbalState", result.state);
                     return result;
                 }.bind(this));
             }.bind(this);
@@ -816,7 +832,7 @@
                 if (requestedMode === "click") {
                     return postJson("/api/gimbal/home", { preserveTracking: false }).then(function (result) {
                         this.applyGimbalTrackingState(result && result.state);
-                        if (result && result.state) this.emit(action === "recordStart" || action === "recordStop" ? "recordingState" : "gimbalState", result.state);
+                        if (result && result.state) this.emit("gimbalState", result.state);
                         this.log("COMMAND", "GIMBAL", "云台正在回中", "command", "Gimbal is centering");
                         return result;
                     }.bind(this));
@@ -1006,6 +1022,7 @@
     };
 
     window.MantaAppTransport = {
+        request: apiFetch,
         create: function (mode) { return mode === "live" ? new LiveTransport() : new MockTransport(); },
         MockTransport: MockTransport,
         LiveTransport: LiveTransport,

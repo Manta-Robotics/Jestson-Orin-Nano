@@ -23,8 +23,8 @@ test('real RTSP source outage reconnects without browser involvement or overwrit
   const source = path.join(directory, 'source.mp4');
   execFileSync('ffmpeg', ['-v','error','-f','lavfi','-i','testsrc2=size=160x120:rate=25','-t','2','-c:v','libx264','-g','25','-bf','0',source]);
   const config = path.join(directory, 'mediamtx.yml');
-  fs.writeFileSync(config, `logLevel: warn\nrtspAddress: 127.0.0.1:${port}\nrtspTransports: [tcp]\nrtmp: no\nhls: no\nwebrtc: no\nsrt: no\npaths:\n  camera:\n    source: publisher\n`);
-  media = spawn(process.env.MANTA_TEST_MEDIAMTX, [config], { stdio: 'ignore' }); await delay(500);
+  fs.writeFileSync(config, `logLevel: warn\nrtspAddress: 127.0.0.1:${port}\nrtspTransports: [tcp]\nplayback: no\nmoq: no\nrtmp: no\nhls: no\nwebrtc: no\nsrt: no\npaths:\n  camera:\n    source: publisher\n`);
+  media = spawn(process.env.MANTA_TEST_MEDIAMTX, [config], { cwd: directory, stdio: 'ignore' }); await delay(500);
   assert.equal(media.exitCode, null);
   const url = `rtsp://127.0.0.1:${port}/camera`;
   function publish() { return spawn('ffmpeg', ['-v','error','-re','-stream_loop','-1','-i',source,'-an','-c:v','copy','-f','rtsp','-rtsp_transport','tcp',url], { stdio: 'ignore' }); }

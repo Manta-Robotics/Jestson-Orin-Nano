@@ -1177,6 +1177,7 @@ function renderRecordTimer(){
 
     // Exposed only for automated Preview verification.
     window.MantaPreview = {
+        getTransport: function () { return transport; },
         state: state,
         showView: showView,
         applyDemoState: applyDemoState,

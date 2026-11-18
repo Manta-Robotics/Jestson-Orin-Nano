@@ -1493,7 +1493,7 @@ class MAVLinkBridge:
             self._handle_command_packet(raw_data)
 
     def _parse_message(self, msg: Any) -> None:
-        record_mavlink(msg, self.target_system, self.target_component)
+        record_mavlink(msg, getattr(self, 'target_system', None), getattr(self, 'target_component', None))
         msg_type = msg.get_type()
 
         if msg_type == 'PARAM_VALUE':

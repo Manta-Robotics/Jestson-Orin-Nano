@@ -7,4 +7,4 @@ class FakeSource extends EventEmitter{
   start(){for(let i=1;i<=100;i++)this.emit('packet',{sequence:i,streamId:this.streamId});}
   close(){}
 }
-runUwbWorker(parentPort,workerData,()=>new FakeSource());
+if (parentPort) runUwbWorker(parentPort,workerData,()=>new FakeSource());

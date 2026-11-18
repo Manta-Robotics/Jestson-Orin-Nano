@@ -9,12 +9,18 @@ const start=source.indexOf('async function collectBeaconCalibrationReading()');
 const end=source.indexOf('\nfunction ',source.indexOf('async function captureBeaconCalibrationPoint()',start));
 function harness({unstable=false,cancel=false}={}) {
   let clock=10000,n=0;
-  const session={active:true,index:0,total:25,point:{yawDeg:0,pitchDeg:0},points:[{role:'fit'}],samples:[],readyAt:0};
+  const session={active:true,index:0,total:25,mode:'rigid_3d',point:{yawDeg:0,pitchDeg:0},points:[{role:'fit'}],samples:[],readyAt:0};
   const gimbalState={feedback:{}};
   const ctx={gimbalBeaconCalibrationState:session,gimbalState,systemState:{telemetry:{uwb:{}}},IS_SIYI:true,
     performance:{now:()=>clock},Date:{now:()=>clock},setTimeout:resolve=>{clock+=40;if(cancel&&clock>10500)session.active=false;resolve();},
     assertBeaconCalibrationSession:s=>{if(!s.active)throw new Error('Calibration cancelled');},
-    calibrationUwbObservation:()=>{n++;if(n<9||n%10===0)return null;gimbalState.feedback={checksumValid:true,attitudeValid:true,updatedAt:clock,yawDeg:0,pitchDeg:0};return {at:clock,key:'[1,5565]',distanceM:2,uwbAzimuthDeg:unstable?(n%2?20:-20):.1,uwbElevationDeg:0};},
+    beaconCalibrationObservation:(_now,_key,mode)=>{
+      assert.equal(mode,session.mode);
+      n++;
+      if(n<9||n%10===0)return null;
+      gimbalState.feedback={checksumValid:true,attitudeValid:true,updatedAt:clock,yawDeg:0,pitchDeg:0};
+      return {at:clock,key:'[1,5565]',distanceM:2,uwbAzimuthDeg:unstable?(n%2?20:-20):.1,uwbElevationDeg:0};
+    },
     calibrationGimbalPose,summarizeBeaconCalibrationReadings,
     publicBeaconCalibrationState:()=>session,moveGimbalToCalibrationPoint:()=>{},
     fitBeaconCalibration:()=>{throw new Error('Should not fit the first point');},persistBeaconCalibration:()=>{throw new Error('Should not save the first point');},

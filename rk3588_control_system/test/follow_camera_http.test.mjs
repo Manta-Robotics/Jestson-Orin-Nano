@@ -22,8 +22,8 @@ test('isolated production HTTP/Socket.IO routes control a simulated A8, save vid
   const rtspSocket = http.createServer(); await new Promise(resolve => rtspSocket.listen(0, '127.0.0.1', resolve));
   const rtspPort = rtspSocket.address().port; await new Promise(resolve => rtspSocket.close(resolve));
   const mediaConfig = path.join(directory, 'mediamtx.yml');
-  await fs.writeFile(mediaConfig, `rtspAddress: 127.0.0.1:${rtspPort}\nrtspTransports: [tcp]\nrtmp: no\nhls: no\nwebrtc: no\nsrt: no\npaths:\n  camera:\n    source: publisher\n`);
-  const media = spawn(process.env.MANTA_TEST_MEDIAMTX, [mediaConfig], { stdio: ['ignore','pipe','pipe'] });
+  await fs.writeFile(mediaConfig, `rtspAddress: 127.0.0.1:${rtspPort}\nrtspTransports: [tcp]\nplayback: no\nmoq: no\nrtmp: no\nhls: no\nwebrtc: no\nsrt: no\npaths:\n  camera:\n    source: publisher\n`);
+  const media = spawn(process.env.MANTA_TEST_MEDIAMTX, [mediaConfig], { cwd: directory, stdio: ['ignore','pipe','pipe'] });
   let mediaLog='';media.stdout.on('data',d=>mediaLog+=d);media.stderr.on('data',d=>mediaLog+=d);
   t.after(() => media.kill('SIGKILL')); await delay(300);
   assert.equal(media.exitCode, null, 'Isolated MediaMTX failed to start: '+mediaLog);

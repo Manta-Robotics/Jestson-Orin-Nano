@@ -6,6 +6,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { PATH_FOLLOW_BOUNDS } from '../backend/uwb_path_follow.js';
+import { SIDE_FOLLOW_BOUNDS, SIDE_FOLLOW_DEFAULTS } from '../backend/uwb_side_follow.js';
 import { PREDICTION_DEFAULTS } from '../backend/uwb_target_prediction.js';
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
@@ -203,6 +204,60 @@ export function validateSystemConfig(config) {
         errors.push('arc_follow.straight_reentry_bearing_deg must exceed arc_exit_bearing_deg');
     }
   }
+  const sideFollow = config.uwb_follow?.side_follow;
+  if (sideFollow !== undefined) {
+    if (!isObject(sideFollow)) errors.push('uwb_follow.side_follow must be an object');
+    else {
+      for (const [key, [low, high]] of Object.entries(SIDE_FOLLOW_BOUNDS)) {
+        if (sideFollow[key] !== undefined && (typeof sideFollow[key] !== 'number'
+          || !Number.isFinite(sideFollow[key]) || sideFollow[key] < low || sideFollow[key] > high))
+          errors.push(`Invalid side_follow.${key}`);
+      }
+      const side = { ...SIDE_FOLLOW_DEFAULTS, ...sideFollow };
+      if (side.motion_window_ms < side.motion_confirm_ms) errors.push('side_follow motion window must cover confirmation');
+      if (side.distance_m <= (config.uwb_follow.safety_distance_m ?? 1) + 0.2)
+        errors.push('side_follow.distance_m must exceed safety distance plus 0.2 m');
+    }
+  }
+  const vesselBearing = config.uwb_follow || {};
+  if (vesselBearing.bearing_sign !== undefined && ![-1, 1].includes(vesselBearing.bearing_sign))
+    errors.push('uwb_follow.bearing_sign must be -1 or 1');
+  if (vesselBearing.bearing_scale !== undefined && (typeof vesselBearing.bearing_scale !== 'number'
+      || !Number.isFinite(vesselBearing.bearing_scale) || vesselBearing.bearing_scale <= 0))
+    errors.push('uwb_follow.bearing_scale must be a positive finite number');
+  if (vesselBearing.bearing_offset_deg !== undefined && (typeof vesselBearing.bearing_offset_deg !== 'number'
+      || !Number.isFinite(vesselBearing.bearing_offset_deg) || Math.abs(vesselBearing.bearing_offset_deg) > 180))
+    errors.push('uwb_follow.bearing_offset_deg must be a finite angle from -180 to 180');
+  if (config.uwb_follow?.continuous_tracking_enabled !== undefined
+    && typeof config.uwb_follow.continuous_tracking_enabled !== 'boolean') errors.push('uwb_follow.continuous_tracking_enabled must be boolean');
+  if (config.uwb_display !== undefined) {
+    const display = config.uwb_display;
+    if (!isObject(display)) errors.push('uwb_display must be an object');
+    else if (display.prediction_packet_timeout_ms !== undefined
+      && (typeof display.prediction_packet_timeout_ms !== 'number'
+        || !Number.isFinite(display.prediction_packet_timeout_ms)
+        || display.prediction_packet_timeout_ms < 100 || display.prediction_packet_timeout_ms > 700))
+      errors.push('uwb_display.prediction_packet_timeout_ms must be between 100 and 700');
+  }
+  const usb = config.uwb_usb;
+  if (usb !== undefined) {
+    if (!isObject(usb)) errors.push('uwb_usb must be an object');
+    else {
+      for (const key of ['enabled', 'vessel_control_enabled', 'speed_gate_enabled', 'output_speed_gate_enabled']) {
+        if (usb[key] !== undefined && typeof usb[key] !== 'boolean') errors.push(`uwb_usb.${key} must be boolean`);
+      }
+      if (usb.enabled && (typeof usb.port !== 'string' || !usb.port.trim())) errors.push('uwb_usb.port is required when enabled');
+      if ((usb.enabled || usb.target_tag_id !== undefined)
+          && (!Number.isInteger(usb.target_tag_id) || usb.target_tag_id < 0 || usb.target_tag_id > 0xffffffff))
+        errors.push('uwb_usb.target_tag_id must select an unsigned 32-bit tag ID');
+      if (usb.baud_rate !== undefined && (!Number.isInteger(usb.baud_rate) || usb.baud_rate < 9600 || usb.baud_rate > 1000000))
+        errors.push('uwb_usb.baud_rate must be an integer between 9600 and 1000000');
+    }
+  }
+  const lossAction = config.uwb_follow?.uwb_loss_action;
+  if (lossAction !== undefined && !['stop', 'last_point_model'].includes(lossAction)) errors.push('uwb_follow.uwb_loss_action must be stop or last_point_model');
+  if (lossAction === 'last_point_model' && (executionMode !== 'relative_imu' || config.uwb_follow?.auto_resume_after_uwb_timeout !== false))
+    errors.push('last_point_model requires relative_imu and auto_resume_after_uwb_timeout=false');
   const pathFollow=config.uwb_follow?.path_follow;
   if(pathFollow!==undefined){
     if(!isObject(pathFollow)||typeof pathFollow.enabled!=='boolean')errors.push('uwb_follow.path_follow must include a boolean enabled');

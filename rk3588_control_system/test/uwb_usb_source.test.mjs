@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { createRequire } from 'node:module';
 import { UwbUsbSource } from '../backend/uwb_usb_source.js';
+import { SmoothedUwbOutput } from '../backend/uwb_smoothed_output.js';
 import { computeBeaconControl } from '../backend/gimbal_beacon.js';
 const Smoother=createRequire(import.meta.url)('../backend/vendor/responsive_smoother.cjs');
 const position=(sequenceId,changes={})=>({type:'position',version:0x0102,sequenceId,
@@ -293,6 +294,32 @@ test('smoothed overspeed keeps the previous output coordinate and observation ti
   for(let seq=7;seq<=27;seq++){f.advance();f.frame(seq);f.source.expire();}
   assert.equal(f.source.snapshot().fresh,false);
   assert.equal(f.source.snapshot().measurementUpdatedAt,old.measurementUpdatedAt);
+});
+
+test('side-follow consumers receive the uncertainty of the admitted Kalman coordinate', () => {
+  const filtered = fixture({ measurement_filter: { enabled: true }, speed_gate_enabled: false });
+  const output = new SmoothedUwbOutput();
+  filtered.frame(1);
+  const first = filtered.source.snapshot();
+  const uncertainty = first.sensors[0].filterUncertaintyM;
+  assert.ok(Number.isFinite(uncertainty) && uncertainty > 0);
+  assert.equal(output.view(first, first.updatedAt).sensors[0].filterUncertaintyM, uncertainty);
+
+  filtered.advance();
+  filtered.frame(2, { distanceCm: 500 });
+  const second = filtered.source.snapshot();
+  assert.equal(second.smoothing.outputSpeedGate.lastDecision.accepted, false);
+  assert.notEqual(second.positionKalman.uncertaintyM, uncertainty);
+  assert.equal(second.measurementUpdatedAt, first.measurementUpdatedAt);
+  assert.equal(output.view(second, second.updatedAt).sensors[0].filterUncertaintyM, uncertainty);
+
+  const stale = output.view(second, second.measurementUpdatedAt + 501);
+  assert.equal(stale.fresh, false);
+  assert.equal(Object.hasOwn(stale.sensors[0], 'filterUncertaintyM'), false);
+  const responsive = fixture();
+  responsive.warm();
+  const plain = responsive.source.snapshot();
+  assert.equal(Object.hasOwn(output.view(plain, plain.updatedAt).sensors[0], 'filterUncertaintyM'), false);
 });
 
 test('output guard uses actual elapsed time and accepts the 1.0 m/s boundary',()=>{

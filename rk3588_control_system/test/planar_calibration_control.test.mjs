@@ -38,7 +38,7 @@ for(const extent of [32,60]) test(`${extent}-degree horizontal grid and independ
 test('horizontal fit handles source angle wrapping and rejects bad held-out observations',()=>{
  assert.ok(fitPlanarCalibration(samples(60,179)).metrics.validationAngularRmsErrorDeg<1e-9);
  const noisy=samples();noisy.find(s=>s.role==='validation').gimbalYawDeg+=20;
- assert.throws(()=>fitPlanarCalibration(noisy),/validation rejected/);
+ assert.throws(()=>fitPlanarCalibration(noisy),/Horizontal calibration rejected.*validation RMS.*previous calibration retained/);
  assert.throws(()=>generatePlanarCalibrationPoints({yawExtentDeg:150,limits}),/range exceeds/);
 });
 

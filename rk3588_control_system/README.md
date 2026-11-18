@@ -20,6 +20,9 @@ backend/server.js
 
 详细的数据流与组件职责见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 
+自动跟随新增后方、左侧、右侧位置选择；左右侧伴随的定位条件、控制方式、API 和验证边界见
+[左右侧伴随](docs/SIDE_FOLLOW.md)。
+
 ## 2. 硬件接线
 
 ### Pixhawk TELEM2
@@ -98,6 +101,8 @@ GIMBAL_REQUIRE_4K=1 bash scripts/probe_gimbal_rtsp.sh
 ```
 
 ## 7. 跟踪模式
+
+控制网页新增“UWB+视觉追踪”模块和融合窗口，支持 YOLO 泳者检测与 UWB 距离/方位融合、实时诊断、相机标定配置和独立演示。使用方法、API 和实机验证边界见 [UWB + YOLO 视觉追踪](docs/UWB_VISION_FUSION.md)。融合计算不接管船体推进。
 
 `face` 与 `swimmer` 是独立检测器，但共用云台运动控制层：
 
@@ -294,3 +299,7 @@ Lua 回归测试使用可选 `lupa` 的 Lua 5.3 解释器执行实际脚本并�
 python3 -m unittest discover -s test -p 'test_*.py'
 node --test --test-concurrency=1
 ```
+
+## Jetson USB UWB
+
+USB 接收、心跳诊断、短时最后位置估算及设备配置见 [JETSON_USB_UWB.md](docs/JETSON_USB_UWB.md)。设备凭据与运行时配置保存在仓库外。

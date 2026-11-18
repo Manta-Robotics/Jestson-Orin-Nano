@@ -294,7 +294,11 @@ export class UwbUsbSource extends EventEmitter {
         // Keep both the last output coordinate and its original timestamp.
       } else {
         this.outputSpeedGate.acceptedCount += 1;
-        this.output=result;
+        // Associate Kalman uncertainty with this admitted coordinate, even
+        // if the next filter update is rejected by the output speed gate.
+        this.output = this.positionKalmanEnabled
+          ? { ...result, filterUncertaintyM: this.positionKalman.uncertaintyM }
+          : result;
         this.outputReference={x:result.smoothedXcm,y:result.smoothedYcm,at:mono};
         this.measurementWall=this.measurementExpiryEnabled?now:receivedWall;
         this.reason=null;
@@ -332,6 +336,7 @@ export class UwbUsbSource extends EventEmitter {
     const angle = fresh ? (azimuthDeg+mount)*Math.PI/180 : null;
     const rawObservation = raw ? { at:this.receivedWall, distanceM:raw.distanceCm/100,
       azimuthDeg:raw.azimuthDeg, elevationDeg:raw.elevationDeg, tagId:raw.tagId } : null;
+    const admittedUncertaintyM = this.output?.filterUncertaintyM;
     const sensor = { receiverId, anchorId:raw?.anchorId ?? null, tagId:raw?.tagId ?? null,
       sequenceId:raw?.sequenceId ?? null, tagStatus:raw?.tagStatus ?? null,
       valid:rawFresh, fresh:rawFresh, rawObservation,
@@ -342,6 +347,7 @@ export class UwbUsbSource extends EventEmitter {
       protocolAzimuthDeg:raw?.protocolAzimuthDeg ?? null, mountYawDeg:mount,
       positionXM:positionX, positionYM:positionY, distanceM, azimuthDeg,
       elevationDeg:raw?.elevationDeg ?? null, measurementStatus:fresh?'trusted':'unavailable',
+      ...(fresh && finite(admittedUncertaintyM) ? { filterUncertaintyM: admittedUncertaintyM } : {}),
       invalidReason:this.reason, ...this.stats };
     const steps=this.stepMetrics.snapshot();
     return { source:'USB_SERIAL', streamId:this.streamId, online:fresh, fresh,

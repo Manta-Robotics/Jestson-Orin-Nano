@@ -17,6 +17,7 @@ import threading
 import time
 import uuid
 
+from logger_config import load_logger_config
 from motion_labels import MotorLabels, esc_power, number
 
 IMU_TYPES = {'HIGHRES_IMU', 'RAW_IMU', 'SCALED_IMU', 'SCALED_IMU2', 'SCALED_IMU3'}
@@ -400,7 +401,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', required=True)
     args = parser.parse_args()
-    config = json.loads(Path(args.config).read_text())
+    config = load_logger_config(args.config)
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     signal.signal(signal.SIGINT, lambda *_: stop.set())

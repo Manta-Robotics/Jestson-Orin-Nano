@@ -35,7 +35,10 @@ test("live mobile frontend exposes and transports beacon mode", () => {
 test("beacon toolbar exposes configurable multipoint calibration", () => {
     assert.match(mobileHtml, /id="gimbalBeaconCalibration"/);
     assert.match(mobileHtml, /id="beaconCalibrationModal"/);
+    assert.match(mobileHtml, /value="horizontal9"/);
     assert.match(transportScript, /\/api\/gimbal\/beacon\/calibration\/capture/);
+    assert.match(transportScript, /\/api\/gimbal\/beacon\/calibration\/apply/);
+    assert.match(serverScript, /fitPlanarCalibration\(session\.samples\)/);
     assert.match(serverScript, /generateBeaconCalibrationPoints\(Math\.random,/);
     assert.match(serverScript, /fitBeaconCalibration\(session\.samples\)/);
     assert.match(serverScript, /points\.length/);
@@ -61,7 +64,6 @@ test("boat auto-follow is controlled from the drive module, not the gimbal view"
     assert.doesNotMatch(mobileHtml, /EKF速度\/位置估计无效，自动跟随保持停止/);
     assert.doesNotMatch(mobileHtml, /目标距离需达到1\.2米后才允许启动/);
     assert.match(mobileHtml, /UWB 自动跟随已启动/);
-    assert.doesNotMatch(mobileHtml, /目标小于1\.2米，推进保持停止/);
     assert.match(mobileHtml, /follow\.relativeBodyM/);
     assert.match(mobileHtml, /follow\.requiredFlightMode/);
     assert.match(transportScript, /setDriveEnabled/);
@@ -75,11 +77,15 @@ test("boat auto-follow is controlled from the drive module, not the gimbal view"
     assert.match(serverScript, /waitForFollowTelemetry/);
 });
 
-test("3D gimbal calibration does not overwrite the boat-follow bearing calibration", () => {
-    assert.match(serverScript, /bearing_sign: GIMBAL_BEACON_CONFIG\.yaw_source_sign/);
-    assert.match(serverScript, /bearing_scale: GIMBAL_BEACON_CONFIG\.yaw_source_scale/);
-    assert.match(serverScript, /bearing_offset_deg: GIMBAL_BEACON_CONFIG\.yaw_offset_deg/);
+test("gimbal calibration preserves the separate boat-follow bearing calibration", () => {
+    const followConfig = serverScript.match(/const uwbControllerConfig = \{[\s\S]*?\n\};/)?.[0];
+    assert.match(followConfig, /\.\.\.UWB_FOLLOW_CONFIG/);
+    assert.doesNotMatch(followConfig, /GIMBAL_BEACON_CONFIG/);
     const start = serverScript.indexOf('function persistBeaconCalibration(result)');
     const end = serverScript.indexOf('function startBeaconCalibrationSession(', start);
-    assert.doesNotMatch(serverScript.slice(start, end), /setBearingCalibration/);
+    assert.ok(start >= 0 && end > start);
+    const persistCalibration = serverScript.slice(start, end);
+    assert.match(persistCalibration, /planar_yaw_calibration: result\.planar_yaw_calibration/);
+    assert.match(persistCalibration, /extrinsic_3d: result\.extrinsic_3d/);
+    assert.doesNotMatch(persistCalibration, /UWB_FOLLOW_CONFIG|setBearingCalibration/);
 });

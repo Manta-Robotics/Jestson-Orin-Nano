@@ -92,6 +92,14 @@
     "traditional_yaw_rate_damping": 0.6,
     "traditional_minimum_turn_speed_scale": 0.15,
     "following_distance_m": 0.5,
+    "side_follow": {
+      "distance_m": 2,
+      "position_gain": 0.4,
+      "minimum_target_speed_mps": 0.2,
+      "motion_confirm_ms": 800,
+      "motion_window_ms": 1600,
+      "max_speed_mps": 0.8
+    },
     "safety_distance_m": 0.3,
     "safety_resume_distance_m": 1.2,
     "hard_stop_enabled": false,
@@ -203,7 +211,8 @@
     },
     "bearing_sign": -1,
     "bearing_scale": 1,
-    "bearing_offset_deg": 0
+    "bearing_offset_deg": 0,
+    "uwb_loss_action": "stop"
   },
   "logs_dir": "./logs",
   "enable_https": false,
@@ -579,6 +588,12 @@
   "uwb_usb": {
     "smoothing_enabled": false,
     "measurement_checks_enabled": false,
-    "measurement_expiry_enabled": false
+    "measurement_expiry_enabled": false,
+    "enabled": false,
+    "port": "/dev/ttyACM1",
+    "baud_rate": 115200,
+    "vessel_control_enabled": false,
+    "speed_gate_enabled": true,
+    "output_speed_gate_enabled": true
   }
 }

@@ -3,9 +3,11 @@ const cloneKeys = (value, keys) => Object.fromEntries(keys.filter(k => value?.[k
 const transportKeys=['kind','connected','port','baud','targetSampleRateHz','processedRateHz','processedFrames','rateLimitedFrames','expiredPendingFrames','expiredCaptureFrames','compute','reconnects','duplicateFrames','rxBytes','goodCount','heartbeatCount','checksumErrors','lengthErrors','noiseBytes','unsupportedVersions','coalescedPositions','positionRateHz','processingMode','workerState','workerThreadId','workerGeneration','workerRestarts','workerMailboxCoalesced','deliveryAgeMs','serialParserProcessId'];
 const smoothingKeys=['responsiveEnabled','measurementChecksEnabled','measurementExpiryEnabled','name','enabled','parameters','warmupCount','smoothedStepRmsCm','sampleAgeMs','inputSampleAgeMs','outputMonotonicMs','input'];
 const gateKeys=['enabled','thresholdMps','comparison','acceptedCount','rejectedCount','lastRejectedAt','lastRejectedSequenceId','lastRejectionReason'];
+const sensorKeys = ['receiverId', 'anchorId', 'tagId', 'sequenceId', 'tagStatus', 'rxBytes', 'goodCount',
+  'heartbeatCount', 'checksumErrors', 'lengthErrors', 'noiseBytes', 'unsupportedVersions', 'positionRateHz'];
 
 // Public position contract. Incoming serial observations are only filter inputs;
-// no diagnostic candidate can replace the admitted smoothed position here.
+// no diagnostic candidate can replace the admitted position here.
 export class SmoothedUwbOutput {
   constructor({elevationVerified=false,elevationSign=1,elevationOffsetDeg=0,elevationTauMs=100}={}) {
     this.elevationVerified=elevationVerified;this.elevationSign=elevationSign;
@@ -39,7 +41,14 @@ export class SmoothedUwbOutput {
       measurementStatus:ready?'trusted':'unavailable',rejectionReason:ready?null:(packet.rejectionReason||'smoothed_position_unavailable'),
       receiverCount:ready?(packet.receiverCount||0):0,observingReceiverCount:ready?(packet.observingReceiverCount||0):0,
       activeReceiverIds:ready?[...(packet.activeReceiverIds||[])]:[],
-      sensors:(packet.sensors||[]).map(s=>({...cloneKeys(s,['receiverId','anchorId','tagId','sequenceId','tagStatus','rxBytes','goodCount','heartbeatCount','checksumErrors','lengthErrors','noiseBytes','unsupportedVersions','positionRateHz']),valid:ready&&s.valid!==false,fresh:ready&&s.fresh!==false,measurementStatus:ready?'trusted':'unavailable'})),
+      sensors: (packet.sensors || []).map(s => {
+        const valid = ready && s.valid !== false;
+        const fresh = ready && s.fresh !== false;
+        const uncertainty = s.filterUncertaintyM;
+        return { ...cloneKeys(s, sensorKeys), valid, fresh,
+          measurementStatus: ready ? 'trusted' : 'unavailable',
+          ...(valid && fresh && finite(uncertainty) && uncertainty >= 0 ? { filterUncertaintyM: uncertainty } : {}) };
+      }),
       smoothing:{...cloneKeys(sm,smoothingKeys),ready,elevationSmoothed:elevationReady&&!raw},
       transport:cloneKeys(packet.transport,transportKeys),speedGate:cloneKeys(packet.speedGate,gateKeys)};
     return out;
