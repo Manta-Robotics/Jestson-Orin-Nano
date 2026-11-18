@@ -116,7 +116,7 @@
             var selected = item.name === selectedName ? " active" : "";
             return '<article class="video-item' + selected + '" data-name="' + encodeURIComponent(item.name) + '">' +
                 '<button class="video-title" type="button" data-action="select">' + item.title + '</button>' +
-                '<div class="video-meta">' + formatDate(item.modifiedAt) + ' · ' + formatSize(item.size) + '</div>' +
+                '<div class="video-meta">' + (item.sessionId ? 'Session ' + item.sessionId.slice(0, 8) + ' · Part ' + item.index + ' · ' : '') + formatDate(item.modifiedAt) + ' · ' + formatSize(item.size) + '</div>' +
                 '<div class="video-actions">' +
                     '<button class="btn" type="button" data-action="rename">Rename</button>' +
                     '<button class="btn" type="button" data-action="download"' + (downloadStatus[item.name] === "Preparing..." ? " disabled" : "") + '>' + (downloadStatus[item.name] || "Download") + '</button>' +

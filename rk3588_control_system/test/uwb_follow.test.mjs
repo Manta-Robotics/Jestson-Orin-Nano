@@ -199,6 +199,7 @@ test('commissioning mode caps forward and reverse body speed', () => {
 
 test('target uses low-speed approach from 1.2m to 0.5m, then hard-stops with hysteresis', () => {
   const controller = new UwbFollowController({
+    following_distance_m: 0.5,
     bearing_sign: 1,
     bearing_scale: 1,
     bearing_offset_deg: 0,
@@ -249,6 +250,7 @@ test('target uses low-speed approach from 1.2m to 0.5m, then hard-stops with hys
 
 test('three-zone distance hold approaches above 0.55m and reverses below 0.3m until 0.5m', () => {
   const controller = new UwbFollowController({
+    following_distance_m: 0.5,
     bearing_sign: 1,
     bearing_scale: 1,
     bearing_offset_deg: 0,

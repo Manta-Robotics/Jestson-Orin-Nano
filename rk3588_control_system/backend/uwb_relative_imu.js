@@ -1,14 +1,18 @@
+import { UwbArcFollowControl } from './uwb_arc_follow.js';
+import { frontTurnReference, minimumTurnThrottle, turnModelThrottle } from './uwb_turn_propulsion.js';
 // Relative following uses UWB polar observations and IMU attitude. Optional
 // GPS speed feedback supplements surge control; learned cruise thrust alone
 // is NOT an absolute speed measurement.
 import { UwbGpsSpeedLoop } from './uwb_gps_speed.js';
 import { UwbRelativeNmpc } from './uwb_relative_nmpc.js';
+import {usableUwbPath} from './uwb_path_integration.js';
 const clamp=(x,a,b)=>Math.max(a,Math.min(b,x));
 const wrap=x=>((x+180)%360+360)%360-180;
 export class RelativeImuControl {
  constructor(config){this.c=config;this.reset();}
- reset(){this.at=null;this.measurementAt=null;this.distance=null;this.rangeRate=0;this.cruise=0;this.throttle=0;this.steering=0;this.bearing=null;this.gpsSpeed=new UwbGpsSpeedLoop(this.c);this.nmpc=new UwbRelativeNmpc(this.c);}
+ reset(){this.arcControl=new UwbArcFollowControl(this.c);this.arcActive=false;this.at=null;this.measurementAt=null;this.distance=null;this.rangeRate=0;this.cruise=0;this.throttle=0;this.steering=0;this.bearing=null;this.gpsSpeed=new UwbGpsSpeedLoop(this.c);this.nmpc=new UwbRelativeNmpc(this.c);}
  pause(){
+  this.arcControl.reset();
   if(this.c.relativeNmpc?.enabled){
    // Neutral actuators do not imply the hull stopped instantly. Retain the
    // bounded motion history/model through a short interruption.
@@ -17,6 +21,7 @@ export class RelativeImuControl {
   const cruise=this.cruise;this.reset();this.cruise=cruise;
  }
  trackApplied(throttle,steering){
+  this.arcControl.trackApplied(throttle,steering);
   if(!this.c.relativeNmpc?.enabled)return;
   this.throttle=throttle;this.steering=steering;this.nmpc.trackApplied(throttle,steering);
  }
@@ -56,9 +61,24 @@ export class RelativeImuControl {
  }
  update({now,preflight,telemetry,estimate,guidance,policy=null}){
   const c=this.c,d=preflight.distanceM;
-  const dt=this.at===null?.1:clamp((now-this.at)/1000,.001,.25);
   const bearing=wrap(preflight.azimuthDeg*c.bearingSign*c.bearingScale+c.bearingOffsetDeg);
-  const rawControl=telemetry.uwb?.controlSource==='raw';
+  // The locked arc only recovers a target behind the vessel. The complete
+  // forward half-plane (including +/-90 degrees) keeps the original follower.
+  if(c.arcFollow?.enabled&&!policy&&Math.abs(bearing)>90){
+   const recent=this.at!==null&&now>=this.at&&now-this.at<=c.navigationTimeoutMs;
+   const handover=this.arcActive||!recent?null:{throttle:this.throttle,steering:this.steering,rangeRate:this.rangeRate};
+   this.arcActive=true;
+   return this.arcControl.update({now,preflight,telemetry,estimate,handover});
+  }
+  if(this.arcActive){
+   const {throttle,steering,rangeRate,at}=this.arcControl;
+   this.reset();
+   if(at!==null&&now>=at&&now-at<=c.navigationTimeoutMs){
+    this.throttle=throttle;this.steering=steering;this.rangeRate=rangeRate;this.at=at;
+   }
+  }
+  const dt=this.at===null?.1:clamp((now-this.at)/1000,.001,.25);
+  const rawControl=telemetry.uwb?.controlSource==='raw'||telemetry.uwb?.directControl===true;
   this.bearing=rawControl||this.bearing===null?bearing:wrap(this.bearing+c.bearingFilterAlpha*wrap(bearing-this.bearing));
   const sampleAt=telemetry.uwb.measurementUpdatedAt;
   const observed=!estimate || ['measured','recovering'].includes(estimate.source);
@@ -96,35 +116,53 @@ export class RelativeImuControl {
   if((requested>c.relativeThrottleLimitPercent && rateError>0)||(requested<0 && rateError<0))this.cruise=previousCruise;
   requested=clamp(this.cruise+kp*rateError,0,c.relativeThrottleLimitPercent);
   if(policy)requested=clamp(policy.nominalThrottlePercent,0,c.relativeThrottleLimitPercent);
-  if(c.relativeNmpc?.enabled&&!rawControl)return this.updatePredictive({now,dt,d,preflight,telemetry,estimate,
+  const path=telemetry.uwbPath;
+  const pathReady=!policy&&c.pathFollow?.enabled===true&&c.gpsSpeedClosedLoop?.enabled===true&&usableUwbPath(path,telemetry,now,c);
+  if(c.relativeNmpc?.enabled&&!rawControl&&!pathReady)return this.updatePredictive({now,dt,d,preflight,telemetry,estimate,
    referenceThrottle:requested,desiredClosing});
+  const frontTurn=!policy&&!pathReady?frontTurnReference(c,bearing):{active:false};
+  const turnStandOff=Math.max(c.followingDistanceM,c.safetyDistanceM);
+  const turnSpeed=Math.min(c.arcFollow.max_speed_mps,c.maxSpeedMps,
+   c.commissioningMode?c.commissioningSpeedMps:c.maxSpeedMps,brakingLimit);
   const gps=this.gpsSpeed.update({now,telemetry,bearingDeg:this.bearing,rangeRateMps:this.rangeRate,
-   desiredClosingMps:desiredClosing,appliedThrottle:this.throttle,policySpeedMps:policy?.nominalSpeedMps,
-   stop:d<=c.safetyDistanceM});
+   desiredClosingMps:desiredClosing,appliedThrottle:this.throttle,policySpeedMps:frontTurn.active?turnSpeed:policy?.nominalSpeedMps??(pathReady?path.desiredSpeedMps:undefined),
+   stop:frontTurn.active?d<=turnStandOff:d<=c.safetyDistanceM});
   if(gps.active)requested=gps.throttlePercent;
   const closing=Math.max(0,-this.rangeRate);
   const braking=closing>brakingLimit+.02;
   if(braking)requested=Math.min(requested,Math.max(0,this.throttle-c.throttleDecelPercentS*dt-kp*(closing-brakingLimit)));
-  const turn=policy?{speedScale:Math.max(0,Math.cos(policy.headingErrorDeg*Math.PI/180)),
+  const pathActive=pathReady&&gps.active;
+  const turn=pathActive?{speedScale:Math.max(0,Math.cos(path.headingErrorDeg*Math.PI/180)),desiredYawRateDegS:clamp(path.yawRateDegS,-c.maxYawRateDegS,c.maxYawRateDegS)}:policy?{speedScale:Math.max(0,Math.cos(policy.headingErrorDeg*Math.PI/180)),
    desiredYawRateDegS:clamp(policy.yawRateDegS,-c.maxYawRateDegS,c.maxYawRateDegS)}
    :guidance.command({headingErrorDeg:this.bearing,measuredYawRateDegS:preflight.measuredYawRateDegS,
     forwardSpeedMps:0,maximumYawRateDegS:c.maxYawRateDegS});
   const alignment=clamp((c.bearingStopDeg-Math.abs(this.bearing))/(c.bearingStopDeg-c.bearingSlowdownDeg),0,1);
-  requested*=turn.speedScale*alignment;
-  const safety=d<=c.safetyDistanceM;
-  if(safety){requested=0;this.cruise=Math.min(this.cruise,this.throttle);}
+  const turnMinimum=frontTurn.active?minimumTurnThrottle(c,{distanceM:d,desiredSpeedMps:turnSpeed,
+   braking,stopped:d<=turnStandOff,gpsActive:gps.active,observed}):0;
+  if(frontTurn.active){
+   if(!gps.active)requested=Math.min(requested*frontTurn.speedScale,turnModelThrottle(c,turnSpeed));
+   requested=Math.max(requested,turnMinimum);
+  }else requested*=turn.speedScale*alignment;
+  const safety=frontTurn.active?d<=turnStandOff:d<=c.safetyDistanceM;
+  const pathHolding=pathActive&&path.desiredSpeedMps<=1e-6;
+  if(safety||pathHolding){requested=0;this.cruise=Math.min(this.cruise,this.throttle);}
   const step=(requested<this.throttle?c.throttleDecelPercentS:c.throttleAccelPercentS)*dt;
   this.throttle+=clamp(requested-this.throttle,-step,step);
-  if(safety || braking || alignment===0)this.throttle=Math.min(this.throttle,requested);
+  if(safety || pathHolding || braking || !frontTurn.active&&alignment===0)this.throttle=Math.min(this.throttle,requested);
   // Track the applied actuator, including slew/braking/turn saturation. A
   // cruise-thrust integrator must not wind up behind a constrained output.
   this.cruise=policy?0:clamp(this.cruise+(this.throttle-(this.cruise+kp*rateError))*dt,0,c.relativeThrottleLimitPercent);
   const steering=clamp(turn.desiredYawRateDegS/c.maxYawRateDegS*c.relativeSteeringLimitDeg,-c.relativeSteeringLimitDeg,c.relativeSteeringLimitDeg);
   this.steering+=clamp(steering-this.steering,-c.steeringSlewDegS*dt,c.steeringSlewDegS*dt);
-  if(safety)this.steering=0;
+  if(safety||pathHolding)this.steering=0;
   this.gpsSpeed.trackApplied(this.throttle,dt);
-  return {safe:true,reason:safety?'holding_distance':'tracking',status:safety?'holding':'tracking',
+  return {safe:true,reason:safety||pathHolding?'holding_distance':'tracking',status:safety||pathHolding?'holding':'tracking',
+   ...(frontTurn.active?{frontTurn:{active:true,speedReferenceMps:safety?0:turnSpeed,
+    minimumThrottlePercent:turnMinimum,gpsSpeedFeedback:gps.active}}:{}),
    controlMode:'relative_manual',requiredFlightMode:'MANUAL',commandFrame:'BODY_RELATIVE',
+   pathFollowActive:pathActive,pathFollowReason:pathActive?'gps_path_follow':pathReady?'speed_feedback_pending':path?.active?'path_reference_unavailable':path?.reason||'disabled',
+   guidanceBearingDeg:pathActive?path.headingErrorDeg:this.bearing,
+   pathReference:path?{active:path.active,reason:path.reason,pointCount:path.pointCount,pathLengthM:path.pathLengthM,remainingM:path.remainingM,crossTrackErrorM:path.crossTrackErrorM,lookaheadM:path.lookaheadM,desiredSpeedMps:path.desiredSpeedMps,inputUpdatedAt:path.inputUpdatedAt}:null,
    relativeImuControl:true,navigationAvailable:gps.active,navigationReason:gps.active?null:'uwb_imu_only',
    gpsSpeedControlActive:gps.active,gpsSpeedControlReason:gps.reason,
    speedControlMode:gps.active?'gps_speed_closed_loop':'uwb_relative',
@@ -137,7 +175,8 @@ export class RelativeImuControl {
    desiredClosingSpeedMps:desiredClosing,relativeApproachLimitMps:approachLimit,brakingClosingLimitMps:brakingLimit,
    brakingActive:braking,learnedCruiseThrottlePercent:policy?null:this.cruise,desiredThrottlePercent:requested,
    throttlePercent:this.throttle,steeringDegrees:this.steering,
-   holdingDistanceM:c.safetyDistanceM,hardStopResumeDistanceM:c.hardStopResumeDistanceM,
+   holdingDistanceM:frontTurn.active?turnStandOff:c.safetyDistanceM,
+   hardStopResumeDistanceM:frontTurn.active?turnStandOff+c.rangeDeadbandM:c.hardStopResumeDistanceM,
    yawRateDegS:turn.desiredYawRateDegS,yawRateRadS:turn.desiredYawRateDegS*Math.PI/180,
    relativeBodyM:{x:d*Math.cos(bearing*Math.PI/180),y:d*Math.sin(bearing*Math.PI/180)}};
  }

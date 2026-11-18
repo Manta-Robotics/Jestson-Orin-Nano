@@ -1,8 +1,10 @@
-# Manta RK3588 Control System
+# Manta Jetson Orin Nano 船端控制系统
 
-Manta 是运行在 LubanCat 5（RK3588）上的水面机器人控制系统，连接 Pixhawk、三轴云台、本地摄像头，并通过 Web、Wi-Fi 热点和蓝牙 PAN 提供操控、跟踪、录像与遥测能力。
+本仓库维护 Manta 水面机器人在 Jetson Orin Nano 上的船端软件，连接 Pixhawk、USB UWB 与 A8 云台，提供手动操控、自动跟随、泳者跟踪、录像和遥测。源码目录沿用上游名称 `rk3588_control_system`。
 
-当前标准部署位置为：
+Jetson 默认使用原有后方跟随，可在停止跟随后选择左侧或右侧伴随。UWB 与 A8 泳者检测的融合结果可在 Web 控制台单独查看。云台校准由操作员确认后写入，实验日志默认保存在 `/home/gongcheng/manta_logs`。
+
+LubanCat 5（RK3588）沿用以下部署目录。Jetson 的串口和网络参数由设备配置提供。
 
 ```text
 /root/Pixhawk_RK3588/rk3588_control_system
@@ -13,10 +15,12 @@ Manta 是运行在 LubanCat 5（RK3588）上的水面机器人控制系统，连
 - [Stonefish + ArduRover 本地三维仿真](https://github.com/Manta-Robotics/Stonefish_SITL)（直接复用本仓库船端控制代码，无需连接板子）
 - [完整安装与使用说明](rk3588_control_system/README.md)
 - [系统架构](rk3588_control_system/docs/ARCHITECTURE.md)
+- [Jetson USB UWB 接收与跟随](rk3588_control_system/docs/JETSON_USB_UWB.md)
+- [左右侧伴随](rk3588_control_system/docs/SIDE_FOLLOW.md) · [UWB 与 A8 视觉融合](rk3588_control_system/docs/UWB_VISION_FUSION.md)
 - [运行维护手册](rk3588_control_system/docs/OPERATIONS.md)
 - [root 新板迁移说明](ROOT_MIGRATION_CN.md)
 
-## 当前硬件基线
+## RK3588 接线参考
 
 | 设备 | 接口 | 配置 |
 | --- | --- | --- |
@@ -36,10 +40,6 @@ npm run check
 ```
 
 所有运行服务由 systemd 管理。仓库中的 `start.sh`、`stop.sh` 和 `scripts/status_report.sh` 是统一运维入口，不再自行清理未知进程或抢占端口。
-
-## 分支
-
-当前新板迁移与持续开发分支：`codex/manta-new-board-migration`。
 
 ## License
 
