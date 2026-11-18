@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import statistics
 
+from history_query import load_session, table_rows
 from logger_config import LOGGER_DIRECTORY, load_logger_config
 
 
@@ -24,6 +25,14 @@ def report(directory, seconds=60):
     root = Path(directory)
     current = json.loads((root/'current.json').read_text())
     session = LOGGER_DIRECTORY / Path(current['session'])
+    if current.get('session_id'):
+        history = load_session(root, current['session_id'])
+        samples = collections.deque(table_rows(history, 'overview'), maxlen=10000)
+        cutoff = int(samples[-1]['mono_ns']) - seconds * 10**9 if samples else 0
+        rows = [row for row in samples if int(row['mono_ns']) >= cutoff]
+        return {'session': str(session), 'window_seconds': seconds, 'schema_version': 2,
+                'status': history['manifest']['status'], 'samples': timing(rows, 'mono_ns'),
+                'latest': rows[-1] if rows else {}, 'gaps': history['gaps']}
     samples = collections.deque(maxlen=10000)
     with (session/'samples.csv').open(newline='') as f:
         for row in csv.DictReader(f):

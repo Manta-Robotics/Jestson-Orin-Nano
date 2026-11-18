@@ -26,10 +26,10 @@ export class SegmentedRecording {
   constructor({ directory, input, binary = 'ffmpeg', codec = 'copy', bitrate = '12M',
     transport = 'tcp', segmentSeconds = 120, startupTimeoutMs = 15000, stallTimeoutMs = 8000,
     retryMs = 1000, stopTimeoutMs = 10000, reserveBytes = 1024 ** 3, reserveRatio = 0.05,
-    spawnProcess = spawn, diskSpace, onChange = () => {}, log = () => {} }) {
+    spawnProcess = spawn, diskSpace, onChange = () => {}, log = () => {}, mediaAlignment = null }) {
     Object.assign(this, { directory, input, binary, codec, bitrate, transport, segmentSeconds,
       startupTimeoutMs, stallTimeoutMs, retryMs, stopTimeoutMs, reserveBytes, reserveRatio,
-      spawnProcess, onChange, log });
+      spawnProcess, onChange, log, mediaAlignment });
     fs.mkdirSync(directory, { recursive: true });
     this.metadataDirectory = path.join(directory, '.sessions');
     fs.mkdirSync(this.metadataDirectory, { recursive: true });
@@ -56,6 +56,9 @@ export class SegmentedRecording {
     const s = this.session;
     return { instanceId: this.instanceId, revision: this.revision, serverTime: Date.now(),
       phase: this.phase, desired: Boolean(s?.desired), active: this.phase === 'recording', error: this.error,
+      recording_id: s?.id || null, clip_id: s?.clip?.clip_id || (s?.id ? `${s.id}-000001` : null),
+      clip_no: s?.clip?.clip_no || (s?.id ? 1 : null),
+      index_state: s?.clip?.index_state || 'none', reason: s?.clip?.reason || null,
       current: s ? { sessionId: s.id, name: s.prefix, title: s.title, startedAt: s.startedAt,
         elapsedMs: Math.max(0, (s.endedAt ? Date.parse(s.endedAt) : Date.now()) - Date.parse(s.startedAt)),
         segmentCount: s.segments.filter(p => p.finalized).length,
@@ -103,7 +106,8 @@ export class SegmentedRecording {
     this.suspended = false; this.attempt = 0; this.error = null;
     const id = randomUUID();
     this.session = { version: 1, id, title: safeName(name), prefix: `${safeName(name).slice(0, 60)}_${id.slice(0, 8)}`,
-      desired: true, startedAt: new Date().toISOString(), endedAt: null, segments: [], interruptions: 0 };
+      desired: true, startedAt: new Date().toISOString(), endedAt: null, segments: [], interruptions: 0,
+      alignmentSessionId: this.mediaAlignment?.getSessionId() || null };
     this.metadataCache = null; this.liveParts = new Map();
     try { this.persist(); } catch (error) { this.session.desired = false; this.phase = 'failed'; throw error; }
     this.launch();
@@ -160,14 +164,25 @@ export class SegmentedRecording {
         '-reset_timestamps', '1', '-segment_format', 'mp4', '-segment_format_options',
         'movflags=+frag_keyframe+empty_moov+default_base_moof', '-flush_packets', '1',
         path.join(this.directory, `${this.session.prefix}__%06d.mp4`));
-      const child = this.spawnProcess(this.binary, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+      const command = this.mediaAlignment?.command(this.session, startIndex, this);
+      const child = this.spawnProcess(command?.binary || this.binary, command?.args || args, { stdio: ['ignore', 'pipe', 'pipe'] });
       const run = { child, startIndex, frames: 0, pending: '', started: Date.now(), lastFrame: Date.now(), stopping: false };
+      run.sessionId = this.session.id;
+      run.aligned = Boolean(command);
       run.closed = new Promise(resolve => { run.resolve = resolve; });
       this.run = run; this.phase = 'starting'; this.publish();
       child.stdout.on('data', data => {
+        if (this.run !== run || this.session?.id !== run.sessionId) return;
         run.pending += data.toString();
         const lines = run.pending.split(/\r?\n/); run.pending = lines.pop();
         for (const line of lines) {
+          if (line.startsWith('alignment=')) {
+            try {
+              const { kind, clip } = JSON.parse(line.slice(10));
+              if (clip?.recording_id === run.sessionId) this.updateClip(clip, kind);
+            } catch (error) { this.log(`Alignment metadata: ${error.message}`); }
+            continue;
+          }
           if (!line.startsWith('frame=')) continue;
           const frames = Number(line.slice(6));
           if (frames <= run.frames) continue;
@@ -181,8 +196,9 @@ export class SegmentedRecording {
       });
       child.stderr.on('data', data => { run.lastError = data.toString().slice(-2000).trim(); this.log(run.lastError); });
       child.once('error', error => { run.lastError = error.message; });
-      child.once('close', (code, signal) => {
+      child.once('close', async (code, signal) => {
         clearInterval(run.monitor); clearTimeout(run.killTimer);
+        if (this.run !== run || this.session?.id !== run.sessionId) { run.resolve(this.state()); return; }
         this.scan(true);
         {
           const empty = this.session.segments.filter(p => p.index >= startIndex
@@ -193,6 +209,17 @@ export class SegmentedRecording {
           this.session.segments = this.session.segments.filter(p => !empty.includes(p));
           for (const part of empty) this.liveParts.delete(part.name);
         }
+        if (this.mediaAlignment && !run.aligned) {
+          const parts = this.session.segments.filter(part => part.index >= startIndex && part.finalized);
+          for (const part of parts) {
+            part.indexing = true;
+            await new Promise(resolve => this.mediaAlignment.legacyIndex(this.session, part, clip => {
+              part.indexing = false;
+              this.updateClip(clip);
+              resolve();
+            }));
+          }
+        }
         this.run = null;
         if (this.session.desired && !this.suspended) {
           this.session.interruptions++;
@@ -200,10 +227,15 @@ export class SegmentedRecording {
           this.phase = 'recovering'; this.publish();
           this.retryTimer = setTimeout(() => this.launch(), Math.min(15000, this.retryMs * 2 ** Math.min(this.attempt++, 4)));
           this.retryTimer.unref?.();
-        } else { this.phase = this.suspended ? 'suspended' : (this.error ? 'failed' : 'stopped'); this.publish(); }
+        } else {
+          const playable = !this.mediaAlignment || this.session.segments.some(part => part.clip?.phase === 'ready');
+          if (!playable && !this.error && !this.suspended) this.error = 'No decodable video in this recording';
+          this.phase = this.suspended ? 'suspended' : (this.error ? 'failed' : 'stopped'); this.publish();
+        }
         run.resolve(this.state());
       });
       run.monitor = setInterval(() => {
+        if (this.run !== run || this.session?.id !== run.sessionId) return;
         try {
           this.scan();
           if (!this.spaceAvailable()) { this.failSpace(); return; }
@@ -239,12 +271,27 @@ export class SegmentedRecording {
   async stop({ preserveIntent = false } = {}) {
     clearTimeout(this.retryTimer); this.retryTimer = null;
     if (!this.session) return this.state();
+    if (!preserveIntent && !this.session.desired) return this.run ? this.run.closed : this.state();
     this.suspended = preserveIntent;
     if (!preserveIntent) { this.session.desired = false; this.session.endedAt = new Date().toISOString(); this.error = null; }
     this.phase = this.run ? 'stopping' : (preserveIntent ? 'suspended' : 'stopped');
     this.publish(); // Persist manual stop before touching the child: it must never resurrect.
     if (this.run) { const run = this.run; this.interrupt(run); await run.closed; }
     return this.state();
+  }
+
+  updateClip(clip, kind = 'clip_ready') {
+    if (clip.recording_id === this.session?.id) {
+      if (!this.liveParts.has(clip.file_name)) this.scan();
+      const part = this.liveParts.get(clip.file_name);
+      if (part) {
+        part.clip = clip;
+        part.indexing = clip.index_state === 'building';
+      }
+      if (!this.session.clip || clip.clip_no >= this.session.clip.clip_no) this.session.clip = clip;
+      this.publish();
+    }
+    if (kind === 'clip_ready') this.mediaAlignment?.onClip(clip, kind);
   }
 
   metadata(name) {
@@ -267,7 +314,7 @@ export class SegmentedRecording {
   isOpen(name) {
     if (!this.run) return false;
     const known = this.liveParts.get(name);
-    if (known) return !known.finalized;
+    if (known) return !known.finalized || Boolean(known.indexing);
     const prefix = `${this.session.prefix}__`;
     return name.startsWith(prefix) && /^\d{6}\.mp4$/.test(name.slice(prefix.length))
       && Number(name.slice(prefix.length, -4)) >= this.run.startIndex;

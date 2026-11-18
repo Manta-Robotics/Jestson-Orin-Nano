@@ -350,7 +350,7 @@ export class UwbUsbSource extends EventEmitter {
       ...(fresh && finite(admittedUncertaintyM) ? { filterUncertaintyM: admittedUncertaintyM } : {}),
       invalidReason:this.reason, ...this.stats };
     const steps=this.stepMetrics.snapshot();
-    return { source:'USB_SERIAL', streamId:this.streamId, online:fresh, fresh,
+    return { source:'USB_SERIAL', streamId:this.streamId, online:fresh, fresh, experiment_stamp:raw?.experiment_stamp??null,
       distanceM, azimuthDeg, elevationDeg:fresh?raw.elevationDeg:null,
       rawDistanceM:sensor.rawDistanceM, rawAzimuthDeg:sensor.rawAzimuthDeg,
       rawElevationDeg:sensor.rawElevationDeg,
