@@ -12,6 +12,8 @@ LubanCat 5（RK3588）沿用以下部署目录。Jetson 的串口和网络参数
 
 ## 快速入口
 
+- [实验日志、告警与录像双向定位](rk3588_control_system/docs/EXPERIMENT_LOGGING_ZH.md)
+
 - [Stonefish + ArduRover 本地三维仿真](https://github.com/Manta-Robotics/Stonefish_SITL)（直接复用本仓库船端控制代码，无需连接板子）
 - [完整安装与使用说明](rk3588_control_system/README.md)
 - [系统架构](rk3588_control_system/docs/ARCHITECTURE.md)
